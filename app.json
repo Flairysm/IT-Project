@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "Receipts",
+    "slug": "it-project",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "it-project",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "backgroundColor": "#0a0a0a"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.receipts.app"
+    },
+    "android": {
+      "package": "com.receipts.app",
+      "usesCleartextTraffic": true
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Receipts needs access to your photos to scan receipts.",
+          "cameraPermission": "Receipts needs camera access to take photos of receipts."
+        }
+      ]
+    ]
+  }
+}
