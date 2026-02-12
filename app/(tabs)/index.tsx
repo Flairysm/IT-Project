@@ -7,6 +7,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as FileSystem from "expo-file-system";
 import { Ionicons } from "@expo/vector-icons";
 import { OCR_SERVER_URL } from "../config";
+import { useAuth } from "../auth-context";
 
 type OcrResponse = {
   extracted?: {
@@ -31,6 +32,7 @@ type HistoryFilter = "all" | "paid" | "unpaid";
 
 export default function HomeScreen() {
   const router = useRouter();
+  const { user } = useAuth();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [historyRows, setHistoryRows] = useState<HistoryRow[]>([]);
@@ -215,8 +217,8 @@ export default function HomeScreen() {
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
         <View style={styles.topSection}>
           <View style={styles.topGlow} />
-          <Text style={styles.greeting}>Good Morning</Text>
-          <Text style={styles.name}>Bryant</Text>
+          <Text style={styles.greeting}>Hello</Text>
+          <Text style={styles.name}>{user || "User"}</Text>
 
           <View style={styles.actionCard}>
             <Text style={styles.actionTitle}>Quick Actions</Text>
