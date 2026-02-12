@@ -4,6 +4,7 @@ const express = require("express");
 const cors = require("cors");
 const Tesseract = require("tesseract.js");
 const FormData = require("form-data");
+const { Pool } = require("pg");
 
 const app = express();
 app.use(cors());
@@ -13,6 +14,82 @@ app.use(express.json({ limit: "20mb" }));
 const RECEIPT_OCR_URL = process.env.RECEIPT_OCR_URL || "";
 /** Optional: use OpenAI Vision (gpt-4o) for receipt extraction when set. Often better for mixed language and layout. */
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+/** Local Postgres connection string (example: postgres://user:pass@localhost:5432/receipts_app). */
+const DATABASE_URL = process.env.DATABASE_URL || "";
+
+const pool = DATABASE_URL ? new Pool({ connectionString: DATABASE_URL }) : null;
+
+async function ensureReceiptsTable() {
+  if (!pool) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS receipts (
+      id BIGSERIAL PRIMARY KEY,
+      merchant TEXT,
+      receipt_date TEXT,
+      total TEXT,
+      source TEXT,
+      items JSONB NOT NULL DEFAULT '[]'::jsonb,
+      members JSONB NOT NULL DEFAULT '[]'::jsonb,
+      assignments JSONB NOT NULL DEFAULT '{}'::jsonb,
+      split_totals JSONB NOT NULL DEFAULT '[]'::jsonb,
+      paid_members JSONB NOT NULL DEFAULT '[]'::jsonb,
+      paid BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+  await pool.query(`
+    ALTER TABLE receipts
+    ADD COLUMN IF NOT EXISTS paid BOOLEAN NOT NULL DEFAULT FALSE;
+  `);
+  await pool.query(`
+    ALTER TABLE receipts
+    ADD COLUMN IF NOT EXISTS paid_members JSONB NOT NULL DEFAULT '[]'::jsonb;
+  `);
+}
+
+async function ensureGroupsTable() {
+  if (!pool) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS member_groups (
+      id BIGSERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      members JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+}
+
+function normalizePaidMembers(raw) {
+  return Array.isArray(raw) ? raw.map((x) => String(x)) : [];
+}
+
+function computePaymentSummary(totalRaw, splitTotalsRaw, paidMembersRaw, paidFlag) {
+  const totalNum = Number.isFinite(parseFloat(totalRaw || "0")) ? parseFloat(totalRaw || "0") : 0;
+  const splitTotals = Array.isArray(splitTotalsRaw) ? splitTotalsRaw : [];
+  const paidMembers = normalizePaidMembers(paidMembersRaw);
+
+  if (!splitTotals.length) {
+    return {
+      paid: Boolean(paidFlag),
+      amount_due: paidFlag ? "0.00" : totalNum.toFixed(2),
+      paid_members: paidMembers,
+    };
+  }
+
+  const unpaidAmount = splitTotals.reduce((sum, row) => {
+    const name = String(row?.name || "");
+    const amount = Number.isFinite(parseFloat(String(row?.amount ?? 0))) ? parseFloat(String(row?.amount ?? 0)) : 0;
+    return paidMembers.includes(name) ? sum : sum + amount;
+  }, 0);
+  const amountDue = Math.max(0, unpaidAmount);
+  const isPaid = amountDue < 0.01;
+
+  return {
+    paid: isPaid,
+    amount_due: amountDue.toFixed(2),
+    paid_members: paidMembers,
+  };
+}
 
 // Lines that mark end of item block (totals / footer) - not "Qty 1" (item line), but "Subtotal", "Total", etc.
 // Include ^service\s+ so OCR misreads like "Service RN" still end the block
@@ -452,8 +529,298 @@ app.post("/ocr", async (req, res) => {
   }
 });
 
+app.post("/receipts", async (req, res) => {
+  try {
+    if (!pool) {
+      return res.status(500).json({ error: "DATABASE_URL is missing in ocr-server/.env" });
+    }
+
+    const {
+      merchant = null,
+      date = null,
+      total = null,
+      source = null,
+      items = [],
+      members = [],
+      assignments = {},
+      split_totals = [],
+    } = req.body || {};
+
+    const insert = await pool.query(
+      `INSERT INTO receipts
+        (merchant, receipt_date, total, source, items, members, assignments, split_totals, paid_members, paid)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10)
+       RETURNING id`,
+      [
+        merchant,
+        date,
+        total,
+        source,
+        JSON.stringify(Array.isArray(items) ? items : []),
+        JSON.stringify(Array.isArray(members) ? members : []),
+        JSON.stringify(assignments && typeof assignments === "object" ? assignments : {}),
+        JSON.stringify(Array.isArray(split_totals) ? split_totals : []),
+        JSON.stringify([]),
+        false,
+      ]
+    );
+
+    return res.json({ ok: true, id: String(insert.rows[0].id) });
+  } catch (err) {
+    console.error("Save receipt failed:", err);
+    return res.status(500).json({ error: err.message || "Failed to save receipt" });
+  }
+});
+
+app.get("/receipts", async (_req, res) => {
+  try {
+    if (!pool) {
+      return res.status(500).json({ error: "DATABASE_URL is missing in ocr-server/.env" });
+    }
+    const result = await pool.query(
+      `SELECT id, merchant, receipt_date, total, source, items, members, assignments, split_totals, paid_members, paid, created_at
+       FROM receipts
+       ORDER BY created_at DESC`
+    );
+
+    const rows = result.rows.map((r) => {
+      const paymentSummary = computePaymentSummary(r.total, r.split_totals, r.paid_members, r.paid);
+      return {
+        id: String(r.id),
+        merchant: r.merchant,
+        date: r.receipt_date,
+        total: r.total,
+        source: r.source,
+        items: r.items || [],
+        members: r.members || [],
+        assignments: r.assignments || {},
+        split_totals: r.split_totals || [],
+        paid_members: paymentSummary.paid_members,
+        paid: paymentSummary.paid,
+        amount_due: paymentSummary.amount_due,
+        created_at: r.created_at,
+      };
+    });
+
+    return res.json({ receipts: rows });
+  } catch (err) {
+    console.error("Fetch receipts failed:", err);
+    return res.status(500).json({ error: err.message || "Failed to fetch receipts" });
+  }
+});
+
+app.get("/receipts/:id", async (req, res) => {
+  try {
+    if (!pool) {
+      return res.status(500).json({ error: "DATABASE_URL is missing in ocr-server/.env" });
+    }
+    const result = await pool.query(
+      `SELECT id, merchant, receipt_date, total, source, items, members, assignments, split_totals, paid_members, paid, created_at
+       FROM receipts
+       WHERE id = $1
+       LIMIT 1`,
+      [req.params.id]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: "Receipt not found" });
+
+    const r = result.rows[0];
+    const paymentSummary = computePaymentSummary(r.total, r.split_totals, r.paid_members, r.paid);
+    return res.json({
+      receipt: {
+        id: String(r.id),
+        merchant: r.merchant,
+        date: r.receipt_date,
+        total: r.total,
+        source: r.source,
+        items: r.items || [],
+        members: r.members || [],
+        assignments: r.assignments || {},
+        split_totals: r.split_totals || [],
+        paid_members: paymentSummary.paid_members,
+        paid: paymentSummary.paid,
+        amount_due: paymentSummary.amount_due,
+        created_at: r.created_at,
+      },
+    });
+  } catch (err) {
+    console.error("Fetch receipt failed:", err);
+    return res.status(500).json({ error: err.message || "Failed to fetch receipt" });
+  }
+});
+
+app.patch("/receipts/:id/paid", async (_req, res) => {
+  try {
+    if (!pool) {
+      return res.status(500).json({ error: "DATABASE_URL is missing in ocr-server/.env" });
+    }
+    const getRow = await pool.query(
+      `SELECT split_totals FROM receipts WHERE id = $1 LIMIT 1`,
+      [_req.params.id]
+    );
+    if (!getRow.rows.length) return res.status(404).json({ error: "Receipt not found" });
+    const splitTotals = Array.isArray(getRow.rows[0].split_totals) ? getRow.rows[0].split_totals : [];
+    const paidMembers = splitTotals.map((x) => String(x?.name || "")).filter(Boolean);
+
+    const result = await pool.query(
+      `UPDATE receipts
+       SET paid = TRUE, paid_members = $2::jsonb
+       WHERE id = $1
+       RETURNING id`,
+      [_req.params.id, JSON.stringify(paidMembers)]
+    );
+    return res.json({ ok: true, id: String(result.rows[0].id) });
+  } catch (err) {
+    console.error("Mark paid failed:", err);
+    return res.status(500).json({ error: err.message || "Failed to mark as paid" });
+  }
+});
+
+app.patch("/receipts/:id/paid-member", async (req, res) => {
+  try {
+    if (!pool) {
+      return res.status(500).json({ error: "DATABASE_URL is missing in ocr-server/.env" });
+    }
+    const { name, paid } = req.body || {};
+    const memberName = String(name || "").trim();
+    if (!memberName) return res.status(400).json({ error: "Member name is required" });
+
+    const current = await pool.query(
+      `SELECT paid_members, split_totals FROM receipts WHERE id = $1 LIMIT 1`,
+      [req.params.id]
+    );
+    if (!current.rows.length) return res.status(404).json({ error: "Receipt not found" });
+
+    const splitTotals = Array.isArray(current.rows[0].split_totals) ? current.rows[0].split_totals : [];
+    const splitNames = splitTotals.map((x) => String(x?.name || ""));
+    if (splitNames.length && !splitNames.includes(memberName)) {
+      return res.status(400).json({ error: "Member does not exist in split totals" });
+    }
+
+    const existing = normalizePaidMembers(current.rows[0].paid_members);
+    const shouldMarkPaid = paid === undefined ? !existing.includes(memberName) : Boolean(paid);
+    const next = shouldMarkPaid
+      ? Array.from(new Set([...existing, memberName]))
+      : existing.filter((x) => x !== memberName);
+
+    const isFullyPaid = splitNames.length ? splitNames.every((x) => next.includes(x)) : false;
+    await pool.query(
+      `UPDATE receipts
+       SET paid_members = $2::jsonb, paid = $3
+       WHERE id = $1`,
+      [req.params.id, JSON.stringify(next), isFullyPaid]
+    );
+
+    return res.json({ ok: true, paid_members: next, paid: isFullyPaid });
+  } catch (err) {
+    console.error("Mark paid member failed:", err);
+    return res.status(500).json({ error: err.message || "Failed to update member payment" });
+  }
+});
+
+app.delete("/receipts/:id", async (req, res) => {
+  try {
+    if (!pool) {
+      return res.status(500).json({ error: "DATABASE_URL is missing in ocr-server/.env" });
+    }
+    const result = await pool.query(
+      `DELETE FROM receipts
+       WHERE id = $1
+       RETURNING id`,
+      [req.params.id]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: "Receipt not found" });
+    return res.json({ ok: true, id: String(result.rows[0].id) });
+  } catch (err) {
+    console.error("Delete receipt failed:", err);
+    return res.status(500).json({ error: err.message || "Failed to delete receipt" });
+  }
+});
+
+app.get("/groups", async (_req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ error: "DATABASE_URL is missing in ocr-server/.env" });
+    const result = await pool.query(
+      `SELECT id, name, members, created_at
+       FROM member_groups
+       ORDER BY created_at DESC`
+    );
+    return res.json({
+      groups: result.rows.map((row) => ({
+        id: String(row.id),
+        name: row.name,
+        members: Array.isArray(row.members) ? row.members.map((x) => String(x)) : [],
+        created_at: row.created_at,
+      })),
+    });
+  } catch (err) {
+    console.error("Fetch groups failed:", err);
+    return res.status(500).json({ error: err.message || "Failed to fetch groups" });
+  }
+});
+
+app.post("/groups", async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ error: "DATABASE_URL is missing in ocr-server/.env" });
+    const { name, members } = req.body || {};
+    const groupName = String(name || "").trim();
+    const safeMembers = Array.isArray(members)
+      ? Array.from(new Set(members.map((x) => String(x).trim()).filter(Boolean)))
+      : [];
+
+    if (!groupName) return res.status(400).json({ error: "Group name is required" });
+    if (!safeMembers.length) return res.status(400).json({ error: "At least one member is required" });
+
+    const result = await pool.query(
+      `INSERT INTO member_groups (name, members)
+       VALUES ($1, $2::jsonb)
+       RETURNING id, name, members, created_at`,
+      [groupName, JSON.stringify(safeMembers)]
+    );
+    const row = result.rows[0];
+    return res.json({
+      group: {
+        id: String(row.id),
+        name: row.name,
+        members: Array.isArray(row.members) ? row.members.map((x) => String(x)) : [],
+        created_at: row.created_at,
+      },
+    });
+  } catch (err) {
+    console.error("Create group failed:", err);
+    return res.status(500).json({ error: err.message || "Failed to create group" });
+  }
+});
+
+app.delete("/groups/:id", async (req, res) => {
+  try {
+    if (!pool) return res.status(500).json({ error: "DATABASE_URL is missing in ocr-server/.env" });
+    const result = await pool.query(
+      `DELETE FROM member_groups
+       WHERE id = $1
+       RETURNING id`,
+      [req.params.id]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: "Group not found" });
+    return res.json({ ok: true, id: String(result.rows[0].id) });
+  } catch (err) {
+    console.error("Delete group failed:", err);
+    return res.status(500).json({ error: err.message || "Failed to delete group" });
+  }
+});
+
 const PORT = process.env.PORT || 3080;
-app.listen(PORT, "0.0.0.0", () => {
+app.listen(PORT, "0.0.0.0", async () => {
+  if (pool) {
+    try {
+      await ensureReceiptsTable();
+      await ensureGroupsTable();
+      console.log("Postgres: connected and receipts table ready");
+    } catch (dbErr) {
+      console.warn("Postgres init failed:", dbErr.message);
+    }
+  } else {
+    console.log("Postgres: disabled (set DATABASE_URL in ocr-server/.env to enable local saving)");
+  }
   console.log(`OCR server at http://localhost:${PORT}`);
   if (OPENAI_API_KEY) {
     console.log("Receipt extraction: OpenAI Vision enabled (OPENAI_API_KEY loaded from ocr-server/.env)");
