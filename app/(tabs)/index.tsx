@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -27,6 +27,8 @@ type HistoryRow = {
   amount_due: string;
 };
 
+type HistoryFilter = "all" | "paid" | "unpaid";
+
 export default function HomeScreen() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
@@ -34,8 +36,23 @@ export default function HomeScreen() {
   const [historyRows, setHistoryRows] = useState<HistoryRow[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historySearch, setHistorySearch] = useState("");
+  const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [loadingDots, setLoadingDots] = useState("");
+
+  const filteredHistoryRows = useMemo(() => {
+    const q = historySearch.trim().toLowerCase();
+    return historyRows.filter((row) => {
+      if (historyFilter === "paid" && !row.paid) return false;
+      if (historyFilter === "unpaid" && row.paid) return false;
+      if (!q) return true;
+      const merchant = (row.merchant || "").toLowerCase();
+      const date = (row.date || "").toLowerCase();
+      const total = (row.total || "").toLowerCase();
+      return merchant.includes(q) || date.includes(q) || total.includes(q) || row.id.includes(q);
+    });
+  }, [historyFilter, historyRows, historySearch]);
 
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
@@ -223,12 +240,35 @@ export default function HomeScreen() {
               <Text style={styles.refreshBtnText}>Refresh</Text>
             </Pressable>
           </View>
+          <TextInput
+            value={historySearch}
+            onChangeText={setHistorySearch}
+            style={styles.searchInput}
+            placeholder="Search by merchant, date, total, or id"
+            placeholderTextColor="#777"
+          />
+          <View style={styles.filterRow}>
+            {(["all", "paid", "unpaid"] as const).map((filter) => {
+              const active = historyFilter === filter;
+              return (
+                <Pressable
+                  key={filter}
+                  onPress={() => setHistoryFilter(filter)}
+                  style={({ pressed }) => [styles.filterChip, active && styles.filterChipActive, pressed && styles.actionBtnPressed]}
+                >
+                  <Text style={[styles.filterChipText, active && styles.filterChipTextActive]}>
+                    {filter === "all" ? "All" : filter === "paid" ? "Paid" : "Unpaid"}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
 
           {historyLoading ? <Text style={styles.historyMeta}>Loading history...</Text> : null}
           {historyError ? <Text style={styles.error}>{historyError}</Text> : null}
-          {!historyLoading && !historyRows.length ? <Text style={styles.historyMeta}>No saved receipts yet.</Text> : null}
+          {!historyLoading && !filteredHistoryRows.length ? <Text style={styles.historyMeta}>No receipts match your search/filter.</Text> : null}
 
-          {historyRows.slice(0, 5).map((row) => (
+          {filteredHistoryRows.slice(0, 8).map((row) => (
             <View key={row.id} style={styles.historyCardWrap}>
               <Pressable
                 style={({ pressed }) => [styles.historyCard, pressed && styles.actionBtnPressed]}
@@ -373,6 +413,34 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 10,
   },
+  searchInput: {
+    minHeight: 40,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.15)",
+    backgroundColor: "#101010",
+    color: "#e5e5e5",
+    fontSize: 13,
+    paddingHorizontal: 12,
+    marginBottom: 10,
+  },
+  filterRow: { flexDirection: "row", gap: 8, marginBottom: 10 },
+  filterChip: {
+    minHeight: 30,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.15)",
+    backgroundColor: "rgba(255,255,255,0.06)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  filterChipActive: {
+    borderColor: "#8DEB63",
+    backgroundColor: "rgba(141,235,99,0.18)",
+  },
+  filterChipText: { color: "#bdbdbd", fontSize: 12, fontWeight: "600" },
+  filterChipTextActive: { color: "#8DEB63", fontWeight: "700" },
   sectionTitle: { color: "#e5e5e5", fontSize: 20, fontWeight: "700", marginBottom: 10 },
   refreshBtn: {
     minHeight: 30,
