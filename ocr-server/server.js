@@ -2,9 +2,15 @@ const path = require("path");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 const express = require("express");
 const cors = require("cors");
+const rateLimit = require("express-rate-limit");
 const Tesseract = require("tesseract.js");
+const { createWorker } = Tesseract;
 const FormData = require("form-data");
+const heicConvert = require("heic-convert");
+const sharp = require("sharp");
 const { Pool } = require("pg");
+
+const OCR_MAX_IMAGE_PX = Number(process.env.OCR_MAX_IMAGE_PX) || 1200;
 
 const app = express();
 app.use(cors());
@@ -16,8 +22,88 @@ const RECEIPT_OCR_URL = process.env.RECEIPT_OCR_URL || "";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 /** Local Postgres connection string (example: postgres://user:pass@localhost:5432/receipts_app). */
 const DATABASE_URL = process.env.DATABASE_URL || "";
+/** Optional: require this API key in x-api-key header for /ocr. Set in production to prevent abuse. */
+const OCR_API_KEY = process.env.OCR_API_KEY || "";
 
 const pool = DATABASE_URL ? new Pool({ connectionString: DATABASE_URL }) : null;
+
+// --- Public OCR: rate limit and optional API key (for multi-tenant cloud) ---
+const ocrLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: Number(process.env.OCR_RATE_LIMIT_PER_MINUTE) || 30,
+  message: { error: "Too many requests; try again in a minute." },
+  standardHeaders: true,
+});
+function optionalOcrAuth(req, res, next) {
+  if (!OCR_API_KEY) return next();
+  const key = req.headers["x-api-key"] || (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  if (key !== OCR_API_KEY) {
+    return res.status(401).json({ error: "Invalid or missing API key. Set x-api-key header." });
+  }
+  next();
+}
+
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, service: "ezsplit-ocr" });
+});
+
+let sharedTesseractWorker = null;
+let sharedTesseractWorkerPromise = null;
+async function getTesseractWorker() {
+  if (sharedTesseractWorker) return sharedTesseractWorker;
+  if (sharedTesseractWorkerPromise) return sharedTesseractWorkerPromise;
+  sharedTesseractWorkerPromise = createWorker("eng", 1, { logger: () => {} }).then((w) => {
+    sharedTesseractWorker = w;
+    return w;
+  });
+  return sharedTesseractWorkerPromise;
+}
+
+/** Strip data URL prefix if present; return raw base64 payload. */
+function normalizeBase64(imageBase64) {
+  if (typeof imageBase64 !== "string") return "";
+  const s = imageBase64.trim();
+  const i = s.indexOf("base64,");
+  return i >= 0 ? s.slice(i + 7) : s;
+}
+
+/** HEIC magic: ftyp at 4-7, then heic/mif1/heix/hevc at 8-11. */
+function isHeic(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 12) return false;
+  if (buffer[4] !== 0x66 || buffer[5] !== 0x74 || buffer[6] !== 0x79 || buffer[7] !== 0x70) return false;
+  const ftyp = buffer.toString("ascii", 8, 12);
+  return /^heic|mif1|heix|hevc/i.test(ftyp) || (buffer[8] === 0x68 && buffer[9] === 0x65 && buffer[10] === 0x69 && buffer[11] === 0x63);
+}
+
+/** Normalize image: strip data URL, decode base64, convert HEIC to JPEG, resize for faster OCR. Returns { buffer, base64 }. */
+async function normalizeImagePayload(imageBase64) {
+  const raw = normalizeBase64(imageBase64);
+  if (!raw) throw new Error("Missing or invalid image data");
+  let buffer = Buffer.from(raw, "base64");
+  if (buffer.length === 0) throw new Error("Image data is empty");
+  if (isHeic(buffer)) {
+    try {
+      buffer = await heicConvert({ buffer, format: "JPEG" });
+    } catch (e) {
+      console.warn("HEIC convert failed:", e.message);
+      throw new Error("Unsupported image format. Use JPEG or PNG.");
+    }
+  }
+  try {
+    const meta = await sharp(buffer).metadata();
+    const w = meta.width || 0;
+    const h = meta.height || 0;
+    if (w > OCR_MAX_IMAGE_PX || h > OCR_MAX_IMAGE_PX) {
+      buffer = await sharp(buffer)
+        .resize(OCR_MAX_IMAGE_PX, OCR_MAX_IMAGE_PX, { fit: "inside", withoutEnlargement: true })
+        .jpeg({ quality: 88 })
+        .toBuffer();
+    }
+  } catch (e) {
+    console.warn("Resize skipped:", e.message);
+  }
+  return { buffer, base64: buffer.toString("base64") };
+}
 
 async function ensureReceiptsTable() {
   if (!pool) return;
@@ -490,19 +576,19 @@ Rules:
   };
 }
 
-app.post("/ocr", async (req, res) => {
+app.post("/ocr", optionalOcrAuth, ocrLimiter, async (req, res) => {
   try {
     const { imageBase64 } = req.body;
     if (!imageBase64) {
       return res.status(400).json({ error: "Missing imageBase64" });
     }
-    const buffer = Buffer.from(imageBase64, "base64");
+    const { buffer, base64: normalizedBase64 } = await normalizeImagePayload(imageBase64);
 
     // Prefer AI vision when configured (usually better for mixed language and layout)
     if (OPENAI_API_KEY) {
       try {
         console.log("OCR request: using OpenAI Vision...");
-        const extracted = await extractReceiptWithVision(imageBase64);
+        const extracted = await extractReceiptWithVision(normalizedBase64);
         console.log("OCR request: Vision OK, items:", extracted.items?.length ?? 0);
         return res.json({ text: "(extracted with AI vision)", extracted, source: "vision" });
       } catch (aiErr) {
@@ -516,7 +602,8 @@ app.post("/ocr", async (req, res) => {
     if (RECEIPT_OCR_URL) {
       text = await ocrViaReceiptOcr(buffer);
     } else {
-      const { data } = await Tesseract.recognize(buffer, "eng", { logger: () => {} });
+      const worker = await getTesseractWorker();
+      const { data } = await worker.recognize(buffer);
       text = data.text || "";
     }
 

@@ -3,7 +3,8 @@ import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-
 import { SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { useRouter } from "expo-router";
-import { OCR_SERVER_URL } from "./config";
+import { useAuth } from "./auth-context";
+import { supabase } from "./lib/supabase";
 
 type GroupRow = {
   id: string;
@@ -13,6 +14,7 @@ type GroupRow = {
 
 export default function ManageGroupsScreen() {
   const router = useRouter();
+  const { user } = useAuth();
   const [groups, setGroups] = useState<GroupRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -21,44 +23,60 @@ export default function ManageGroupsScreen() {
   const [creating, setCreating] = useState(false);
 
   const loadGroups = useCallback(async () => {
+    if (!user?.id) return;
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${OCR_SERVER_URL}/groups`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to load groups");
-      setGroups(Array.isArray(data?.groups) ? data.groups : []);
+      const { data: rows, error: err } = await supabase
+        .from("groups")
+        .select("id, name, group_members(user_id, profiles(username))")
+        .eq("host_id", user.id);
+      if (err) throw new Error(err.message);
+      const list = (rows || []).map((g: { id: string; name: string; group_members?: Array<{ profiles?: { username?: string } | null }> }) => ({
+        id: String(g.id),
+        name: g.name,
+        members: (g.group_members || []).map((gm) => gm.profiles?.username).filter(Boolean) as string[],
+      }));
+      setGroups(list);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load groups");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
     void loadGroups();
   }, [loadGroups]);
 
   const createGroup = async () => {
+    if (!user?.id) return;
     const name = groupName.trim();
-    const members = membersInput
+    const memberNames = membersInput
       .split(",")
-      .map((x) => x.trim())
+      .map((x) => x.trim().toLowerCase())
       .filter(Boolean);
-    if (!name || !members.length) {
-      setError("Enter a group name and at least one member.");
+    if (!name || !memberNames.length) {
+      setError("Enter a group name and at least one member (username).");
       return;
     }
     setCreating(true);
     setError(null);
     try {
-      const res = await fetch(`${OCR_SERVER_URL}/groups`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, members }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to create group");
+      const { data: groupRow, error: groupErr } = await supabase
+        .from("groups")
+        .insert({ host_id: user.id, name })
+        .select("id")
+        .single();
+      if (groupErr) throw new Error(groupErr.message);
+      const groupId = groupRow?.id;
+      if (!groupId) throw new Error("Failed to create group");
+      for (const username of memberNames) {
+        const { data: profileRow } = await supabase.from("profiles").select("id").eq("username", username).maybeSingle();
+        if (profileRow?.id) {
+          await supabase.from("group_members").insert({ group_id: groupId, user_id: profileRow.id });
+        }
+      }
       setGroupName("");
       setMembersInput("");
       await loadGroups();
@@ -70,10 +88,10 @@ export default function ManageGroupsScreen() {
   };
 
   const deleteGroup = async (id: string) => {
+    if (!user?.id) return;
     try {
-      const res = await fetch(`${OCR_SERVER_URL}/groups/${id}`, { method: "DELETE" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to delete group");
+      const { error } = await supabase.from("groups").delete().eq("id", id).eq("host_id", user.id);
+      if (error) throw new Error(error.message);
       setGroups((prev) => prev.filter((g) => g.id !== id));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete group");

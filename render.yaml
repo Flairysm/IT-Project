@@ -1,0 +1,19 @@
+# Render.com blueprint — deploy EZSplit OCR server (public/multi-user)
+# Connect this repo in Render Dashboard → New → Blueprint → select this file.
+# Set Root Directory to "ocr-server" in the service, or use the paths below.
+services:
+  - type: web
+    name: ezsplit-ocr
+    runtime: docker
+    dockerfilePath: ./ocr-server/Dockerfile
+    dockerContext: ./ocr-server
+    plan: free
+    envVars:
+      - key: PORT
+        value: "3080"
+      # Optional: set OCR_API_KEY in Render dashboard; add same value in app as EXPO_PUBLIC_OCR_API_KEY
+      # - key: OCR_API_KEY
+      #   generateValue: true
+      # Optional: better receipt parsing (uses OpenAI; costs per request)
+      # - key: OPENAI_API_KEY
+      #   sync: false

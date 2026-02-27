@@ -8,6 +8,7 @@ import { useAuth } from "./auth-context";
 export default function AuthScreen() {
   const { user, loading, signUp, login } = useAuth();
   const [isSignUp, setIsSignUp] = useState(true);
+  const [email, setEmail] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -20,8 +21,8 @@ export default function AuthScreen() {
     setSubmitting(true);
     setError(null);
     try {
-      if (isSignUp) await signUp(username, password, confirmPassword);
-      else await login(username, password);
+      if (isSignUp) await signUp(email, password, confirmPassword, username || undefined);
+      else await login(email, password);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Authentication failed");
     } finally {
@@ -35,17 +36,30 @@ export default function AuthScreen() {
       <View style={styles.card}>
         <Text style={styles.title}>{isSignUp ? "Create Account" : "Login"}</Text>
         <Text style={styles.subtitle}>
-          {isSignUp ? "Set username + password." : "Use your saved credentials."}
+          {isSignUp ? "Sign up with email. Set a username for EZSplit." : "Sign in with your email."}
         </Text>
 
         <TextInput
-          value={username}
-          onChangeText={setUsername}
+          value={email}
+          onChangeText={setEmail}
           style={styles.input}
-          placeholder="Username"
+          placeholder="Email"
           placeholderTextColor="#737373"
           autoCapitalize="none"
+          keyboardType="email-address"
+          autoComplete="email"
         />
+        {isSignUp ? (
+          <TextInput
+            value={username}
+            onChangeText={setUsername}
+            style={styles.input}
+            placeholder="Username (optional)"
+            placeholderTextColor="#737373"
+            autoCapitalize="none"
+            autoComplete="username"
+          />
+        ) : null}
         <TextInput
           value={password}
           onChangeText={setPassword}
@@ -53,6 +67,7 @@ export default function AuthScreen() {
           placeholder="Password"
           placeholderTextColor="#737373"
           secureTextEntry
+          autoComplete={isSignUp ? "new-password" : "password"}
         />
         {isSignUp ? (
           <TextInput
@@ -62,6 +77,7 @@ export default function AuthScreen() {
             placeholder="Confirm Password"
             placeholderTextColor="#737373"
             secureTextEntry
+            autoComplete="new-password"
           />
         ) : null}
 
@@ -117,4 +133,3 @@ const styles = StyleSheet.create({
   switchBtnText: { color: "#a3a3a3", fontSize: 12, fontWeight: "600" },
   pressed: { opacity: 0.9 },
 });
-
