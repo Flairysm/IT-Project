@@ -332,7 +332,7 @@ export default function HomeScreen() {
   };
 
   const onAddFriendsPress = () => router.push("/(tabs)/friends");
-  const onManageGroupsPress = () => router.push("/(tabs)/groups");
+  const onManualSplitPress = () => router.push({ pathname: "/scan-result", params: { source: "manual" } });
 
   if (loading) {
     return (
@@ -386,9 +386,9 @@ export default function HomeScreen() {
               <Ionicons name="person-add-outline" size={20} color="#0a0a0a" />
               <Text style={styles.quickActionBtnText}>Add Friends</Text>
             </Pressable>
-            <Pressable style={({ pressed }) => [styles.quickActionBtn, pressed && styles.actionBtnPressed]} onPress={onManageGroupsPress}>
-              <Ionicons name="people-outline" size={20} color="#0a0a0a" />
-              <Text style={styles.quickActionBtnText}>Manage Groups</Text>
+            <Pressable style={({ pressed }) => [styles.quickActionBtn, pressed && styles.actionBtnPressed]} onPress={onManualSplitPress}>
+              <Ionicons name="create-outline" size={20} color="#0a0a0a" />
+              <Text style={styles.quickActionBtnText}>Manual Split</Text>
             </Pressable>
           </View>
 

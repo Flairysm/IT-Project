@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Modal, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
+import { useRouter } from "expo-router";
 import { Image } from "expo-image";
 import { useAuth } from "../auth-context";
 import { supabase } from "../lib/supabase";
@@ -31,6 +32,7 @@ function displayName(username: string): string {
 }
 
 export default function FriendsScreen() {
+  const router = useRouter();
   const { user, profile } = useAuth();
   const [friends, setFriends] = useState<FriendRow[]>([]);
   const [pending, setPending] = useState<FriendRow[]>([]);
@@ -286,7 +288,11 @@ export default function FriendsScreen() {
           ) : (
             <View style={styles.listCard}>
               {filteredFriends.map((f, idx) => (
-                <View key={f.id} style={[styles.listRow, idx === filteredFriends.length - 1 && styles.listRowLast]}>
+                <Pressable
+                  key={f.id}
+                  style={({ pressed }) => [styles.listRow, idx === filteredFriends.length - 1 && styles.listRowLast, pressed && styles.pressed]}
+                  onPress={() => router.push(`/friend/${f.id}`)}
+                >
                   {f.avatar_url ? (
                     <Image source={{ uri: f.avatar_url }} style={styles.avatarSmallImg} />
                   ) : (
@@ -299,7 +305,7 @@ export default function FriendsScreen() {
                     <Text style={styles.listRowHandle} numberOfLines={1}>@{f.username}</Text>
                   </View>
                   <Ionicons name="chevron-forward" size={20} color="#525252" />
-                </View>
+                </Pressable>
               ))}
               {filteredFriends.length === 0 && searchQuery.trim() ? (
                 <Text style={styles.noResults}>No matches for "{searchQuery.trim()}"</Text>

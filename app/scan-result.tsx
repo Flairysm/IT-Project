@@ -3,11 +3,34 @@ import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Tex
 import { SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import * as FileSystem from "expo-file-system";
 import { Ionicons } from "@expo/vector-icons";
 import { Image as ExpoImage } from "expo-image";
 import { useAuth } from "./auth-context";
 import { supabase } from "./lib/supabase";
 import { formatAmount } from "./lib/currency";
+
+const RECEIPT_IMAGES_BUCKET = "receipt-images";
+
+async function uploadReceiptImage(imageUri: string, userId: string, receiptId: string): Promise<string | null> {
+  try {
+    const file = new FileSystem.File(imageUri);
+    const base64 = await file.base64();
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const path = `${userId}/${receiptId}.jpg`;
+    const { error } = await supabase.storage.from(RECEIPT_IMAGES_BUCKET).upload(path, bytes, {
+      contentType: "image/jpeg",
+      upsert: true,
+    });
+    if (error) return null;
+    const { data } = supabase.storage.from(RECEIPT_IMAGES_BUCKET).getPublicUrl(path);
+    return data?.publicUrl ?? null;
+  } catch {
+    return null;
+  }
+}
 
 type ResultItem = { name?: string; qty?: number; price?: string };
 type Assignments = Record<number, number[]>;
@@ -40,6 +63,7 @@ export default function ScanResultScreen() {
   const imageUri = params.imageUri;
   const receiptId = params.receiptId?.trim() || null;
   const isEditMode = Boolean(receiptId);
+  const isManualMode = source === "manual" && !receiptId;
 
   const [merchant, setMerchant] = useState(params.merchant || "");
   const [date, setDate] = useState(params.date || "");
@@ -178,6 +202,13 @@ export default function ScanResultScreen() {
   useEffect(() => {
     if (isEditMode && user?.id) void loadReceiptForEdit();
   }, [isEditMode, user?.id, loadReceiptForEdit]);
+
+  useEffect(() => {
+    if (isManualMode && items.length === 0) {
+      setItems([{ name: "", qty: 1, price: "0" }]);
+      setEditItemsMode(true);
+    }
+  }, [isManualMode]);
 
   const filteredFriends = useMemo(() => {
     const q = friendSearchQuery.trim().toLowerCase();
@@ -650,6 +681,12 @@ export default function ScanResultScreen() {
         const { data: itemRows } = await supabase.from("receipt_items").select("id").eq("receipt_id", newId).order("created_at", { ascending: true });
         const itemIdsInOrder = (itemRows || []).map((r: { id: string }) => r.id);
         await insertReceiptAssignments(String(newId), itemIdsInOrder);
+        if (imageUri && user?.id) {
+          const imageUrl = await uploadReceiptImage(imageUri, user.id, String(newId));
+          if (imageUrl) {
+            await supabase.from("receipts").update({ image_url: imageUrl }).eq("id", newId);
+          }
+        }
         setSavedId(String(newId));
       }
     } catch (e) {
@@ -681,29 +718,61 @@ export default function ScanResultScreen() {
             <Ionicons name="arrow-back" size={22} color="#e5e5e5" />
           </Pressable>
           <View style={styles.headerTextWrap}>
-            <Text style={styles.title}>{isEditMode ? "Edit receipt" : "Review receipt"}</Text>
-            <Text style={styles.subtitle}>{isEditMode ? "Edit details and split" : "Assign items and save"}</Text>
+            <Text style={styles.title}>{isEditMode ? "Edit receipt" : isManualMode ? "Manual split" : "Review receipt"}</Text>
+            <Text style={styles.subtitle}>{isEditMode ? "Edit details and split" : isManualMode ? "Enter receipt details and split" : "Assign items and save"}</Text>
           </View>
         </View>
 
-        {/* Receipt hero */}
+        {/* Receipt hero - no image in manual mode */}
         <View style={styles.heroCard}>
-          {imageUri ? (
+          {!isManualMode && (imageUri ? (
             <Image source={{ uri: imageUri }} style={styles.heroImage} resizeMode="cover" />
           ) : (
             <View style={styles.heroPlaceholder}>
               <Ionicons name="receipt-outline" size={48} color="#525252" />
             </View>
-          )}
+          ))}
           <View style={styles.heroStrip}>
             <View style={styles.heroInitialWrap}>
               <Text style={styles.heroInitial}>{receiptInitial(merchant || "-")}</Text>
             </View>
             <View style={styles.heroMeta}>
-              <Text style={styles.heroMerchant} numberOfLines={1}>{merchant || "—"}</Text>
-              <Text style={styles.heroDate}>{date || "—"}</Text>
+              {isManualMode ? (
+                <>
+                  <TextInput
+                    style={styles.heroMerchantInput}
+                    value={merchant}
+                    onChangeText={setMerchant}
+                    placeholder="Merchant name"
+                    placeholderTextColor="#525252"
+                  />
+                  <TextInput
+                    style={styles.heroDateInput}
+                    value={date}
+                    onChangeText={setDate}
+                    placeholder="Date"
+                    placeholderTextColor="#525252"
+                  />
+                </>
+              ) : (
+                <>
+                  <Text style={styles.heroMerchant} numberOfLines={1}>{merchant || "—"}</Text>
+                  <Text style={styles.heroDate}>{date || "—"}</Text>
+                </>
+              )}
             </View>
-            <Text style={styles.heroTotal}>{total ? formatAmount(total, currencyCode) : "—"}</Text>
+            {isManualMode ? (
+              <TextInput
+                style={styles.heroTotalInput}
+                value={total}
+                onChangeText={setTotal}
+                placeholder="0.00"
+                placeholderTextColor="#737373"
+                keyboardType="decimal-pad"
+              />
+            ) : (
+              <Text style={styles.heroTotal}>{total ? formatAmount(total, currencyCode) : "—"}</Text>
+            )}
           </View>
         </View>
 
