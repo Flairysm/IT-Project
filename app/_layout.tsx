@@ -9,7 +9,9 @@ function AppNavigator() {
   const inAuthScreen = segments[0] === "auth";
 
   if (loading) return null;
-  if (!user && !inAuthScreen) return <Redirect href="/auth" />;
+  const publicRoutes = ["terms", "privacy"];
+  const isPublicRoute = publicRoutes.includes(segments[0] ?? "");
+  if (!user && !inAuthScreen && !isPublicRoute) return <Redirect href="/auth" />;
   if (user && inAuthScreen) return <Redirect href="/(tabs)" />;
   return <Stack screenOptions={{ headerShown: false }} />;
 }

@@ -1,22 +1,26 @@
 {
   "expo": {
-    "name": "Receipts",
-    "slug": "it-project",
+    "name": "EZSplit",
+    "slug": "ezsplit",
     "version": "1.0.0",
     "orientation": "portrait",
-    "scheme": "it-project",
+    "scheme": "ezsplit",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "splash": {
-      "backgroundColor": "#0a0a0a"
+      "image": "./assets/EZSplitSplash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0b100b"
     },
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.receipts.app"
+      "bundleIdentifier": "com.ezsplit.app"
     },
     "android": {
-      "package": "com.receipts.app",
+      "package": "com.ezsplit.app",
       "usesCleartextTraffic": true
     },
     "plugins": [
@@ -24,10 +28,18 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Receipts needs access to your photos to scan receipts.",
-          "cameraPermission": "Receipts needs camera access to take photos of receipts."
+          "photosPermission": "EZSplit needs access to your photos to scan receipts.",
+          "cameraPermission": "EZSplit needs camera access to take photos of receipts."
         }
-      ]
-    ]
+      ],
+      "expo-notifications"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "67160189-2b72-43f6-9372-5d6f2528f6b1"
+      },
+      "router": {}
+    },
+    "owner": "flairysm"
   }
 }

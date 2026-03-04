@@ -7,6 +7,7 @@ import { Image } from "expo-image";
 import { useAuth } from "../auth-context";
 import { supabase } from "../lib/supabase";
 import { Ionicons } from "@expo/vector-icons";
+import { SubscriptionDiamond } from "../components/SubscriptionDiamond";
 
 type FriendRow = {
   id: string;
@@ -182,6 +183,7 @@ export default function FriendsScreen() {
       >
       <View style={styles.header}>
         <Text style={styles.title}>Friends</Text>
+        <SubscriptionDiamond />
       </View>
 
       <View style={styles.actionsRow}>
@@ -424,6 +426,9 @@ export default function FriendsScreen() {
               <View style={styles.modalErrorWrap}>
                 <Ionicons name="warning-outline" size={14} color="#fca5a5" />
                 <Text style={styles.modalError}>{error}</Text>
+                <Pressable onPress={() => setError(null)} style={styles.modalErrorDismiss} hitSlop={8}>
+                  <Ionicons name="close" size={18} color="#a3a3a3" />
+                </Pressable>
               </View>
             ) : null}
 
@@ -697,6 +702,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(252,165,165,0.2)",
   },
   modalError: { color: "#fca5a5", fontSize: 13, flex: 1 },
+  modalErrorDismiss: { padding: 4 },
   modalActions: { flexDirection: "row", gap: 12, marginTop: 8 },
   modalCancel: { flex: 1, paddingVertical: 14, borderRadius: 14, borderWidth: 1, borderColor: "rgba(255,255,255,0.2)", alignItems: "center" },
   modalCancelText: { color: "#e5e5e5", fontSize: 15, fontWeight: "600" },

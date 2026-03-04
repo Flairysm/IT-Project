@@ -148,7 +148,21 @@ export default function FriendDetailScreen() {
 
       {error ? (
         <View style={styles.errorBlock}>
-          <Text style={styles.errorText}>{error}</Text>
+          <View style={styles.errorBlockRow}>
+            <Ionicons name="warning-outline" size={18} color="#fca5a5" />
+            <Text style={styles.errorBlockText}>{error}</Text>
+            <Pressable onPress={() => setError(null)} style={styles.errorDismissIcon} hitSlop={8}>
+              <Ionicons name="close" size={20} color="#a3a3a3" />
+            </Pressable>
+          </View>
+          <View style={styles.errorActions}>
+            <Pressable onPress={() => setError(null)} style={({ pressed }) => [styles.errorBtn, pressed && styles.pressed]}>
+              <Text style={styles.errorBtnText}>Dismiss</Text>
+            </Pressable>
+            <Pressable onPress={() => { setError(null); void loadProfile(); }} style={({ pressed }) => [styles.errorBtn, styles.errorBtnRetry, pressed && styles.pressed]}>
+              <Text style={styles.errorBtnText}>Retry</Text>
+            </Pressable>
+          </View>
         </View>
       ) : null}
     </SafeAreaView>
@@ -166,7 +180,14 @@ const styles = StyleSheet.create({
   title: { flex: 1, color: "#fff", fontSize: 18, fontWeight: "700", textAlign: "center" },
   errorWrap: { flex: 1, justifyContent: "center", alignItems: "center", gap: 12, padding: 24 },
   errorText: { color: "#fca5a5", fontSize: 14, textAlign: "center" },
-  errorBlock: { padding: 16, marginHorizontal: 16, backgroundColor: "rgba(252,165,165,0.12)", borderRadius: 12 },
+  errorBlock: { padding: 16, marginHorizontal: 16, marginBottom: 12, backgroundColor: "rgba(252,165,165,0.12)", borderRadius: 12 },
+  errorBlockRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  errorBlockText: { color: "#fca5a5", fontSize: 14, flex: 1 },
+  errorDismissIcon: { padding: 4 },
+  errorActions: { flexDirection: "row", gap: 10, marginTop: 10 },
+  errorBtn: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.1)" },
+  errorBtnRetry: { backgroundColor: "rgba(141,235,99,0.2)" },
+  errorBtnText: { color: "#e5e5e5", fontSize: 14, fontWeight: "600" },
   card: {
     alignItems: "center",
     marginHorizontal: 20,

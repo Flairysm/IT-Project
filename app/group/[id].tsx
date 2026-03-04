@@ -40,6 +40,7 @@ export default function GroupDetailScreen() {
   const [groupName, setGroupName] = useState("");
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [members, setMembers] = useState<MemberRow[]>([]);
+  const [pendingMembers, setPendingMembers] = useState<MemberRow[]>([]);
   const [hostId, setHostId] = useState<string | null>(null);
   const [addModalVisible, setAddModalVisible] = useState(false);
   const [friendsList, setFriendsList] = useState<FriendOption[]>([]);
@@ -69,8 +70,16 @@ export default function GroupDetailScreen() {
       setHostId((g as { host_id?: string }).host_id ?? null);
       const gms = (g as { group_members?: Array<{ user_id: string; status?: string; profiles?: { username?: string; avatar_url?: string | null } | null }> }).group_members ?? [];
       const acceptedOnly = gms.filter((gm) => gm.status === "accepted");
+      const pendingOnly = gms.filter((gm) => gm.status === "pending");
       setMembers(
         acceptedOnly.map((gm) => ({
+          user_id: gm.user_id,
+          username: (gm.profiles as { username?: string })?.username ?? "?",
+          avatar_url: (gm.profiles as { avatar_url?: string | null })?.avatar_url ?? null,
+        }))
+      );
+      setPendingMembers(
+        pendingOnly.map((gm) => ({
           user_id: gm.user_id,
           username: (gm.profiles as { username?: string })?.username ?? "?",
           avatar_url: (gm.profiles as { avatar_url?: string | null })?.avatar_url ?? null,
@@ -268,9 +277,25 @@ export default function GroupDetailScreen() {
           </Pressable>
           <Text style={styles.title}>Group</Text>
         </View>
-        <View style={styles.errorBlock}>
-          <Text style={styles.errorText}>{error}</Text>
-        </View>
+        {error ? (
+          <View style={styles.errorWrap}>
+            <View style={styles.errorRow}>
+              <Ionicons name="warning-outline" size={16} color="#fca5a5" />
+              <Text style={styles.errorText}>{error}</Text>
+              <Pressable onPress={() => setError(null)} style={styles.errorDismissIcon} hitSlop={8}>
+                <Ionicons name="close" size={20} color="#a3a3a3" />
+              </Pressable>
+            </View>
+            <View style={styles.errorActions}>
+              <Pressable onPress={() => setError(null)} style={({ pressed }) => [styles.errorBtn, pressed && styles.pressed]}>
+                <Text style={styles.errorBtnText}>Dismiss</Text>
+              </Pressable>
+              <Pressable onPress={() => { setError(null); void loadGroup(); }} style={({ pressed }) => [styles.errorBtn, styles.errorBtnRetry, pressed && styles.pressed]}>
+                <Text style={styles.errorBtnText}>Retry</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
       </SafeAreaView>
     );
   }
@@ -333,14 +358,29 @@ export default function GroupDetailScreen() {
 
         {error ? (
           <View style={styles.errorWrap}>
-            <Ionicons name="warning-outline" size={16} color="#fca5a5" />
-            <Text style={styles.errorText}>{error}</Text>
+            <View style={styles.errorRow}>
+              <Ionicons name="warning-outline" size={16} color="#fca5a5" />
+              <Text style={styles.errorText}>{error}</Text>
+              <Pressable onPress={() => setError(null)} style={styles.errorDismissIcon} hitSlop={8}>
+                <Ionicons name="close" size={20} color="#a3a3a3" />
+              </Pressable>
+            </View>
+            <View style={styles.errorActions}>
+              <Pressable onPress={() => setError(null)} style={({ pressed }) => [styles.errorBtn, pressed && styles.pressed]}>
+                <Text style={styles.errorBtnText}>Dismiss</Text>
+              </Pressable>
+              <Pressable onPress={() => { setError(null); void loadGroup(); }} style={({ pressed }) => [styles.errorBtn, styles.errorBtnRetry, pressed && styles.pressed]}>
+                <Text style={styles.errorBtnText}>Retry</Text>
+              </Pressable>
+            </View>
           </View>
         ) : null}
 
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionLabel}>Members ({members.length})</Text>
+            <Text style={styles.sectionLabel}>
+              Members ({members.length}{pendingMembers.length > 0 ? ` of ${members.length + pendingMembers.length}` : ""})
+            </Text>
             {isHost ? (
               <Pressable style={({ pressed }) => [styles.addMemberBtn, pressed && styles.pressed]} onPress={() => setAddModalVisible(true)}>
                 <Ionicons name="person-add" size={18} color="#8DEB63" />
@@ -370,6 +410,27 @@ export default function GroupDetailScreen() {
             ))}
           </View>
         </View>
+
+        {isHost && pendingMembers.length > 0 ? (
+          <View style={styles.section}>
+            <Text style={styles.sectionLabel}>Pending invitations ({pendingMembers.length})</Text>
+            <View style={styles.memberList}>
+              {pendingMembers.map((m, idx) => (
+                <View key={m.user_id} style={[styles.memberRow, idx === pendingMembers.length - 1 && styles.memberRowLast]}>
+                  {m.avatar_url ? (
+                    <Image source={{ uri: m.avatar_url }} style={styles.memberAvatarImg} />
+                  ) : (
+                    <View style={styles.memberAvatar}>
+                      <Text style={styles.memberAvatarText}>{groupInitial(m.username)}</Text>
+                    </View>
+                  )}
+                  <Text style={styles.memberName}>@{m.username}</Text>
+                  <Text style={styles.pendingChip}>Pending</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+        ) : null}
 
         {!isHost && user?.id && members.some((m) => m.user_id === user.id) ? (
           <View style={styles.leaveSection}>
@@ -489,8 +550,14 @@ const styles = StyleSheet.create({
   },
   nameReadOnly: { color: "#e5e5e5", fontSize: 18, fontWeight: "600" },
   errorBlock: { padding: 20 },
-  errorWrap: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: "rgba(252,165,165,0.12)", padding: 12, borderRadius: 12, marginBottom: 16 },
+  errorWrap: { backgroundColor: "rgba(252,165,165,0.12)", padding: 12, borderRadius: 12, marginBottom: 16, borderWidth: 1, borderColor: "rgba(252,165,165,0.25)" },
+  errorRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   errorText: { color: "#fca5a5", fontSize: 14, flex: 1 },
+  errorDismissIcon: { padding: 4 },
+  errorActions: { flexDirection: "row", gap: 10, marginTop: 10 },
+  errorBtn: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.1)" },
+  errorBtnRetry: { backgroundColor: "rgba(141,235,99,0.2)" },
+  errorBtnText: { color: "#e5e5e5", fontSize: 14, fontWeight: "600" },
   section: { marginTop: 8 },
   sectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
   sectionLabel: { color: "#e5e5e5", fontSize: 15, fontWeight: "700" },
@@ -504,6 +571,7 @@ const styles = StyleSheet.create({
   memberAvatarText: { color: "#8DEB63", fontSize: 16, fontWeight: "700" },
   memberName: { flex: 1, color: "#e5e5e5", fontSize: 15 },
   youChip: { color: "#737373", fontSize: 12, fontWeight: "600" },
+  pendingChip: { color: "#a3a3a3", fontSize: 12, fontWeight: "600" },
   removeMemberBtn: { padding: 4 },
   leaveSection: { marginTop: 24, marginBottom: 16 },
   leaveGroupBtn: {

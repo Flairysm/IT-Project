@@ -16,6 +16,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "../auth-context";
 import { supabase } from "../lib/supabase";
 import { formatAmount } from "../lib/currency";
+import { SubscriptionDiamond } from "../components/SubscriptionDiamond";
 
 type HistoryRow = {
   id: string;
@@ -169,8 +170,11 @@ export default function HistoryTabScreen() {
       >
         <View style={styles.accent} />
         <View style={styles.header}>
-          <Text style={styles.title}>History</Text>
-          <Text style={styles.subtitle}>Your receipt history</Text>
+          <View>
+            <Text style={styles.title}>History</Text>
+            <Text style={styles.subtitle}>Your receipt history</Text>
+          </View>
+          <SubscriptionDiamond />
         </View>
 
         {rows.length > 0 ? (
@@ -249,8 +253,21 @@ export default function HistoryTabScreen() {
             <Text style={styles.meta}>Loading...</Text>
           ) : error ? (
             <View style={styles.errorWrap}>
-              <Ionicons name="warning-outline" size={18} color="#fca5a5" />
-              <Text style={styles.errorText}>{error}</Text>
+              <View style={styles.errorRow}>
+                <Ionicons name="warning-outline" size={18} color="#fca5a5" />
+                <Text style={styles.errorText}>{error}</Text>
+                <Pressable onPress={() => setError(null)} style={styles.errorDismissIcon} hitSlop={8}>
+                  <Ionicons name="close" size={20} color="#a3a3a3" />
+                </Pressable>
+              </View>
+              <View style={styles.errorActions}>
+                <Pressable onPress={() => setError(null)} style={({ pressed }) => [styles.errorBtn, pressed && styles.btnPressed]}>
+                  <Text style={styles.errorBtnText}>Dismiss</Text>
+                </Pressable>
+                <Pressable onPress={() => { setError(null); void loadReceipts(); }} style={({ pressed }) => [styles.errorBtn, styles.errorBtnRetry, pressed && styles.btnPressed]}>
+                  <Text style={styles.errorBtnText}>Retry</Text>
+                </Pressable>
+              </View>
             </View>
           ) : !filtered.length ? (
             <View style={styles.emptyState}>
@@ -320,7 +337,7 @@ const styles = StyleSheet.create({
   scroll: { flex: 1 },
   scrollContent: { paddingBottom: 32 },
   accent: { height: 4, backgroundColor: "#8DEB63", marginBottom: 20 },
-  header: { paddingHorizontal: 20, marginBottom: 16 },
+  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 20, marginBottom: 16 },
   title: { color: "#fff", fontSize: 28, fontWeight: "800", marginBottom: 4 },
   subtitle: { color: "#a3a3a3", fontSize: 14 },
   summaryRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 20, marginBottom: 20 },
@@ -403,9 +420,6 @@ const styles = StyleSheet.create({
   tabBadgeText: { color: "#fff", fontSize: 11, fontWeight: "700" },
   meta: { color: "#737373", fontSize: 14, marginBottom: 12 },
   errorWrap: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
     backgroundColor: "rgba(252,165,165,0.12)",
     padding: 12,
     borderRadius: 12,
@@ -413,7 +427,14 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(252,165,165,0.2)",
   },
-  errorText: { color: "#fca5a5", fontSize: 14 },
+  errorRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  errorText: { color: "#fca5a5", fontSize: 14, flex: 1 },
+  errorDismissIcon: { padding: 4 },
+  errorActions: { flexDirection: "row", gap: 10, marginTop: 10 },
+  errorBtn: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.1)" },
+  errorBtnRetry: { backgroundColor: "rgba(141,235,99,0.2)" },
+  errorBtnText: { color: "#e5e5e5", fontSize: 14, fontWeight: "600" },
+  btnPressed: { opacity: 0.8 },
   emptyState: { alignItems: "center", paddingVertical: 48, paddingHorizontal: 24 },
   emptyIconWrap: {
     width: 88,

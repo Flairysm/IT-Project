@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Alert,
   Modal,
@@ -12,13 +12,17 @@ import {
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 import { useAuth } from "../auth-context";
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import { File } from "expo-file-system";
 import { supabase } from "../lib/supabase";
+import { EZSPLIT_URL } from "../config";
 import { CURRENCIES, getCurrency } from "../lib/currency";
+import { SubscriptionDiamond } from "../components/SubscriptionDiamond";
+import { savePushTokenToProfile } from "../lib/notifications";
 
 function initials(displayName: string, username: string): string {
   if (displayName && displayName.trim()) {
@@ -31,7 +35,7 @@ function initials(displayName: string, username: string): string {
 }
 
 export default function SettingScreen() {
-  const { profile, user, logout, updateUsername, updateDisplayName, updateCurrency, updateAvatarUrl } = useAuth();
+  const { profile, user, logout, refreshProfile, updateUsername, updateDisplayName, updateCurrency, updateAvatarUrl } = useAuth();
   const [accountModalVisible, setAccountModalVisible] = useState(false);
   const [currencyModalVisible, setCurrencyModalVisible] = useState(false);
   const [displayNameDraft, setDisplayNameDraft] = useState(profile?.display_name ?? "");
@@ -40,6 +44,15 @@ export default function SettingScreen() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [notificationLoading, setNotificationLoading] = useState(false);
+  const [notificationStatus, setNotificationStatus] = useState<"on" | "off" | "unknown">("unknown");
+  const [deletingAccount, setDeletingAccount] = useState(false);
+  const router = useRouter();
+
+  useEffect(() => {
+    const perm = profile?.push_token ? "on" : "off";
+    setNotificationStatus(perm);
+  }, [profile?.push_token]);
 
   const displayName = (profile?.display_name || profile?.username || "User").trim();
   const username = profile?.username ?? "user";
@@ -129,6 +142,10 @@ export default function SettingScreen() {
       <StatusBar style="light" />
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         <View style={styles.accent} />
+        <View style={styles.settingTopRow}>
+          <View style={styles.settingTopSpacer} />
+          <SubscriptionDiamond />
+        </View>
         <View style={styles.profileHeader}>
           <Pressable
             style={styles.avatarWrap}
@@ -177,19 +194,122 @@ export default function SettingScreen() {
               </View>
               <Ionicons name="chevron-forward" size={18} color="#737373" />
             </Pressable>
-            <View style={[styles.cardRow, styles.cardRowLast]}>
+            <Pressable
+              style={({ pressed }) => [styles.cardRow, pressed && styles.pressed]}
+              onPress={() => {
+                Alert.alert(
+                  "Delete account",
+                  "This will permanently delete your account and all your data (receipts, groups, friends). You will need to sign up again to use EZSplit. This cannot be undone.",
+                  [
+                    { text: "Cancel", style: "cancel" },
+                    {
+                      text: "Delete",
+                      style: "destructive",
+                      onPress: async () => {
+                        if (!user?.id) return;
+                        setDeletingAccount(true);
+                        try {
+                          const { data: { session } } = await supabase.auth.getSession();
+                          const token = session?.access_token;
+                          if (!token) {
+                            Alert.alert("Error", "Session expired. Please log out and log in again, then try again.");
+                            return;
+                          }
+                          const res = await fetch(`${EZSPLIT_URL}/functions/v1/delete-account`, {
+                            method: "POST",
+                            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+                          });
+                          const body = await res.json().catch(() => ({}));
+                          if (!res.ok) {
+                            Alert.alert("Error", (body as { error?: string }).error ?? "Could not delete account.");
+                            return;
+                          }
+                          await logout();
+                          Alert.alert("Account deleted", "Your account has been permanently deleted.");
+                        } catch (e) {
+                          Alert.alert("Error", e instanceof Error ? e.message : "Could not delete account.");
+                        } finally {
+                          setDeletingAccount(false);
+                        }
+                      },
+                    },
+                  ]
+                );
+              }}
+              disabled={deletingAccount}
+            >
               <View style={styles.cardRowIcon}>
-                <Ionicons name="notifications-outline" size={20} color="#737373" />
+                {deletingAccount ? <ActivityIndicator size="small" color="#fca5a5" /> : <Ionicons name="trash-outline" size={20} color="#fca5a5" />}
+              </View>
+              <View style={styles.cardRowText}>
+                <Text style={styles.cardRowTitleDanger}>Delete account</Text>
+                <Text style={styles.cardRowSub}>Permanently remove your account and data</Text>
+              </View>
+              {!deletingAccount && <Ionicons name="chevron-forward" size={18} color="#737373" />}
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.cardRow, styles.cardRowLast, pressed && styles.pressed]}
+              onPress={async () => {
+                if (!user?.id || notificationLoading) return;
+                setNotificationLoading(true);
+                try {
+                  const result = await savePushTokenToProfile(user.id);
+                  await refreshProfile();
+                  if (result.ok) {
+                    setNotificationStatus("on");
+                    Alert.alert("Notifications", "You will receive reminder notifications when someone sends you a reminder.");
+                  } else {
+                    Alert.alert("Notifications", result.error ?? "Could not enable. Use a physical device and allow notifications in system settings.");
+                  }
+                } catch (e) {
+                  Alert.alert("Notifications", e instanceof Error ? e.message : "Could not enable notifications.");
+                } finally {
+                  setNotificationLoading(false);
+                }
+              }}
+              disabled={notificationLoading}
+            >
+              <View style={styles.cardRowIcon}>
+                <Ionicons name={notificationStatus === "on" ? "notifications" : "notifications-outline"} size={20} color={notificationStatus === "on" ? "#8DEB63" : "#737373"} />
               </View>
               <View style={styles.cardRowText}>
                 <Text style={styles.cardRowTitle}>Notifications</Text>
-                <Text style={styles.cardRowSub}>Coming soon</Text>
+                <Text style={styles.cardRowSub}>
+                  {notificationLoading ? "Enabling…" : notificationStatus === "on" ? "On — you can receive reminders" : "Off — tap to enable reminders"}
+                </Text>
               </View>
-            </View>
+              {notificationLoading ? <ActivityIndicator size="small" color="#8DEB63" /> : notificationStatus === "on" ? <Ionicons name="checkmark-circle" size={20} color="#8DEB63" /> : <Ionicons name="chevron-forward" size={18} color="#737373" />}
+            </Pressable>
           </View>
         </View>
 
-        <Pressable style={({ pressed }) => [styles.logoutBtn, pressed && styles.pressed]} onPress={() => void logout()}>
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Legal</Text>
+          <View style={styles.card}>
+            <Pressable style={({ pressed }) => [styles.cardRow, pressed && styles.pressed]} onPress={() => router.push("/terms")}>
+              <View style={styles.cardRowIcon}>
+                <Ionicons name="document-text-outline" size={20} color="#8DEB63" />
+              </View>
+              <View style={styles.cardRowText}>
+                <Text style={styles.cardRowTitle}>Terms of Service</Text>
+                <Text style={styles.cardRowSub}>Read the terms</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#737373" />
+            </Pressable>
+            <Pressable style={({ pressed }) => [styles.cardRow, styles.cardRowLast, pressed && styles.pressed]} onPress={() => router.push("/privacy")}>
+              <View style={styles.cardRowIcon}>
+                <Ionicons name="shield-checkmark-outline" size={20} color="#8DEB63" />
+              </View>
+              <View style={styles.cardRowText}>
+                <Text style={styles.cardRowTitle}>Privacy Policy</Text>
+                <Text style={styles.cardRowSub}>How we handle your data</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#737373" />
+            </Pressable>
+          </View>
+        </View>
+
+        <Pressable style={({ pressed }) => [styles.logoutBtn, pressed && styles.pressed]} onPress={() => void logout()} disabled={deletingAccount}>
           <Ionicons name="log-out-outline" size={20} color="#fca5a5" />
           <Text style={styles.logoutBtnText}>Log out</Text>
         </Pressable>
@@ -231,6 +351,9 @@ export default function SettingScreen() {
               <View style={styles.modalErrorWrap}>
                 <Ionicons name="warning-outline" size={14} color="#fca5a5" />
                 <Text style={styles.modalError}>{error}</Text>
+                <Pressable onPress={() => setError(null)} style={styles.modalErrorDismiss} hitSlop={8}>
+                  <Ionicons name="close" size={18} color="#a3a3a3" />
+                </Pressable>
               </View>
             ) : null}
 
@@ -305,6 +428,8 @@ const styles = StyleSheet.create({
   scroll: { flex: 1 },
   scrollContent: { paddingBottom: 32 },
   accent: { height: 4, backgroundColor: "#8DEB63", marginBottom: 24 },
+  settingTopRow: { flexDirection: "row", justifyContent: "flex-end", paddingHorizontal: 20, marginBottom: 12 },
+  settingTopSpacer: { flex: 1 },
   profileHeader: {
     alignItems: "center",
     paddingHorizontal: 20,
@@ -364,6 +489,7 @@ const styles = StyleSheet.create({
   cardRowText: { flex: 1, minWidth: 0 },
   cardRowTitle: { color: "#e5e5e5", fontSize: 16, fontWeight: "600" },
   cardRowSub: { color: "#737373", fontSize: 13, marginTop: 2 },
+  cardRowTitleDanger: { color: "#fca5a5", fontSize: 16, fontWeight: "600" },
   logoutBtn: {
     flexDirection: "row",
     alignItems: "center",
@@ -432,6 +558,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(252,165,165,0.2)",
   },
   modalError: { color: "#fca5a5", fontSize: 13, flex: 1 },
+  modalErrorDismiss: { padding: 4 },
   modalActions: { flexDirection: "row", gap: 12, marginTop: 8 },
   modalCancel: { flex: 1, paddingVertical: 14, borderRadius: 14, borderWidth: 1, borderColor: "rgba(255,255,255,0.2)", alignItems: "center" },
   modalCancelText: { color: "#e5e5e5", fontSize: 15, fontWeight: "600" },

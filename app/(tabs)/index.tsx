@@ -11,6 +11,8 @@ import { OCR_API_KEY, OCR_SERVER_URL } from "../config";
 import { useAuth } from "../auth-context";
 import { supabase } from "../lib/supabase";
 import { CURRENCIES, formatAmount, getCurrency } from "../lib/currency";
+import { checkRateLimit, RATE_LIMIT } from "../lib/rateLimit";
+import { SubscriptionDiamond } from "../components/SubscriptionDiamond";
 
 type OcrResponse = {
   extracted?: {
@@ -31,8 +33,19 @@ type HistoryRow = {
   amount_due: string;
 };
 
-type OwedToYouItem = { fromUsername: string; amount: number; receiptId: string; merchant: string | null; members: string[] };
-type YouOweItem = { toUsername: string; creatorDisplayName: string; amount: number; receiptId: string; merchant: string | null; members: string[] };
+type OwedToYouItem = { fromUsername: string; amount: number; receiptId: string; merchant: string | null; date: string | null; members: string[] };
+type YouOweItem = { toUsername: string; creatorDisplayName: string; amount: number; receiptId: string; merchant: string | null; date: string | null; members: string[] };
+
+function formatSettlementDate(dateStr: string | null): string {
+  if (!dateStr) return "";
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return "";
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  } catch {
+    return "";
+  }
+}
 
 function memberInitial(username: string): string {
   const s = (username || "").trim();
@@ -76,7 +89,7 @@ export default function HomeScreen() {
     try {
       const { data: rows, error } = await supabase
         .from("receipts")
-        .select("id, merchant, receipt_date, total_amount, paid, split_totals, paid_members")
+        .select("id, merchant, receipt_date, created_at, total_amount, paid, split_totals, paid_members")
         .eq("host_id", user.id)
         .order("created_at", { ascending: false });
       if (error) throw new Error(error.message);
@@ -118,7 +131,7 @@ export default function HomeScreen() {
           const name = String(s?.name ?? "");
           const amount = Number(s?.amount ?? 0) || 0;
           if (paidMembers.includes(name)) continue;
-          breakdown.push({ fromUsername: name, amount, receiptId: String(r.id), merchant: r.merchant ?? null, members });
+          breakdown.push({ fromUsername: name, amount, receiptId: String(r.id), merchant: r.merchant ?? null, date: r.created_at ?? null, members });
         }
       }
       setOwedToYouBreakdown(breakdown);
@@ -139,10 +152,10 @@ export default function HomeScreen() {
       const myUsername = profile.username.toLowerCase();
       const { data: receipts } = await supabase
         .from("receipts")
-        .select("id, merchant, split_totals, paid_members, host_id")
+        .select("id, merchant, created_at, split_totals, paid_members, host_id")
         .order("created_at", { ascending: false })
         .limit(300);
-      const withHostId: { amount: number; receiptId: string; merchant: string | null; hostId: string; members: string[] }[] = [];
+      const withHostId: { amount: number; receiptId: string; merchant: string | null; date: string | null; hostId: string; members: string[] }[] = [];
       const hostIds = new Set<string>();
       for (const r of receipts || []) {
         if (r.host_id === user.id) continue;
@@ -154,9 +167,9 @@ export default function HomeScreen() {
         const amount = Number(myEntry?.amount ?? 0) || 0;
         const members = (splitTotals as { name?: string }[]).map((s) => String(s?.name ?? "").trim()).filter(Boolean);
         hostIds.add(String(r.host_id));
-        withHostId.push({ amount, receiptId: String(r.id), merchant: r.merchant ?? null, hostId: String(r.host_id), members });
+        withHostId.push({ amount, receiptId: String(r.id), merchant: r.merchant ?? null, date: r.created_at ?? null, hostId: String(r.host_id), members });
       }
-      let list: YouOweItem[] = withHostId.map((item) => ({ toUsername: "Unknown", creatorDisplayName: "Unknown", amount: item.amount, receiptId: item.receiptId, merchant: item.merchant, members: item.members }));
+      let list: YouOweItem[] = withHostId.map((item) => ({ toUsername: "Unknown", creatorDisplayName: "Unknown", amount: item.amount, receiptId: item.receiptId, merchant: item.merchant, date: item.date, members: item.members }));
       if (hostIds.size > 0) {
         const { data: profiles } = await supabase.from("profiles").select("id, username, display_name").in("id", Array.from(hostIds));
         const byId = Object.fromEntries((profiles || []).map((p) => [String((p as { id: string }).id), p as { username: string; display_name?: string | null }]));
@@ -169,6 +182,7 @@ export default function HomeScreen() {
             amount: item.amount,
             receiptId: item.receiptId,
             merchant: item.merchant,
+            date: item.date,
             members: item.members,
           };
         });
@@ -256,6 +270,10 @@ export default function HomeScreen() {
   }, [loading]);
 
   const processPickedImage = async (imageUri: string) => {
+    if (!checkRateLimit("scan", RATE_LIMIT.scan)) {
+      setError("Please wait a few seconds before scanning again.");
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -361,16 +379,14 @@ export default function HomeScreen() {
         <View style={styles.topSection}>
           <View style={styles.topGlow} />
           <View style={styles.topHeaderRow}>
-            <View>
+            <View style={styles.topHeaderLeft}>
               <Text style={styles.greeting}>Welcome To EZSplit,</Text>
               <Text style={styles.name}>{displayName}</Text>
+              <Pressable onPress={() => setCurrencyModalVisible(true)} style={({ pressed }) => [styles.currencyChip, pressed && styles.actionBtnPressed]}>
+                <Text style={styles.currencyChipText}>{currentCurrency.flag} {currentCurrency.symbol}</Text>
+              </Pressable>
             </View>
-            <Pressable
-              onPress={() => setCurrencyModalVisible(true)}
-              style={({ pressed }) => [styles.currencyButton, pressed && styles.actionBtnPressed]}
-            >
-              <Text style={styles.currencyFlag}>{currentCurrency.flag}</Text>
-            </Pressable>
+            <SubscriptionDiamond />
           </View>
 
           <Pressable
@@ -426,6 +442,9 @@ export default function HomeScreen() {
                     >
                       <View style={styles.obligationRowLeft}>
                         <Text style={styles.obligationRowMerchant} numberOfLines={1}>{item.merchant || "Receipt"}</Text>
+                        {formatSettlementDate(item.date) ? (
+                          <Text style={styles.obligationRowDate}>{formatSettlementDate(item.date)}</Text>
+                        ) : null}
                         <Text style={styles.obligationRowName} numberOfLines={1}>created by {profile?.display_name?.trim() || profile?.username || "You"}</Text>
                         {item.members.length > 0 ? (
                           <View style={styles.settlementAvatarsRow}>
@@ -467,6 +486,9 @@ export default function HomeScreen() {
                     >
                       <View style={styles.obligationRowLeft}>
                         <Text style={styles.obligationRowMerchant} numberOfLines={1}>{item.merchant || "Receipt"}</Text>
+                        {formatSettlementDate(item.date) ? (
+                          <Text style={styles.obligationRowDate}>{formatSettlementDate(item.date)}</Text>
+                        ) : null}
                         <Text style={styles.obligationRowName} numberOfLines={1}>created by {item.creatorDisplayName}</Text>
                         {item.members.length > 0 ? (
                           <View style={styles.settlementAvatarsRow}>
@@ -503,8 +525,17 @@ export default function HomeScreen() {
 
         {error ? (
           <View style={styles.sectionCard}>
-            <Text style={styles.sectionTitle}>Scan Error</Text>
+            <View style={styles.errorHeaderRow}>
+              <Ionicons name="warning-outline" size={20} color="#fca5a5" />
+              <Text style={styles.errorCardTitle}>Something went wrong</Text>
+              <Pressable onPress={() => setError(null)} style={({ pressed }) => [styles.errorDismissBtn, pressed && styles.actionBtnPressed]}>
+                <Ionicons name="close" size={22} color="#a3a3a3" />
+              </Pressable>
+            </View>
             <Text style={styles.error}>{error}</Text>
+            <Pressable onPress={() => setError(null)} style={({ pressed }) => [styles.errorTryAgainBtn, pressed && styles.actionBtnPressed]}>
+              <Text style={styles.errorTryAgainText}>Dismiss</Text>
+            </Pressable>
           </View>
         ) : null}
       </ScrollView>
@@ -606,20 +637,17 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 16,
   },
+  topHeaderLeft: { flex: 1, minWidth: 0 },
   greeting: { color: "#b7b7b7", fontSize: 14, marginBottom: 2 },
-  name: { color: "#e5e5e5", fontSize: 24, fontWeight: "700" },
-  currencyButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: "rgba(255,255,255,0.12)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.15)",
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
+  name: { color: "#e5e5e5", fontSize: 24, fontWeight: "700", marginBottom: 4 },
+  currencyChip: {
+    alignSelf: "flex-start",
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    backgroundColor: "rgba(255,255,255,0.1)",
   },
-  currencyFlag: { fontSize: 36, lineHeight: 44 },
+  currencyChipText: { color: "#a3a3a3", fontSize: 13, fontWeight: "600" },
   currencyModalBackdrop: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.6)",
@@ -680,7 +708,8 @@ const styles = StyleSheet.create({
   obligationRowOwedToYou: { backgroundColor: "rgba(141,235,99,0.08)", borderWidth: 1, borderColor: "rgba(141,235,99,0.25)" },
   obligationRowYouOwe: { backgroundColor: "rgba(251,191,36,0.06)", borderWidth: 1, borderColor: "rgba(251,191,36,0.15)" },
   obligationRowLeft: { flex: 1, minWidth: 0, marginRight: 12 },
-  obligationRowMerchant: { color: "#fff", fontSize: 17, fontWeight: "700", marginBottom: 4 },
+  obligationRowMerchant: { color: "#fff", fontSize: 17, fontWeight: "700", marginBottom: 2 },
+  obligationRowDate: { color: "#737373", fontSize: 13, marginBottom: 4 },
   obligationRowName: { color: "#a3a3a3", fontSize: 15, fontWeight: "500", marginBottom: 6 },
   settlementAvatarsRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap" },
   settlementAvatar: {
@@ -748,5 +777,10 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.08)",
   },
   sectionTitle: { color: "#e5e5e5", fontSize: 20, fontWeight: "700", marginBottom: 10 },
-  error: { color: "#fca5a5" },
+  error: { color: "#fca5a5", marginBottom: 12 },
+  errorCardTitle: { color: "#e5e5e5", fontSize: 16, fontWeight: "700", flex: 1 },
+  errorHeaderRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 8 },
+  errorDismissBtn: { marginLeft: "auto", padding: 4 },
+  errorTryAgainBtn: { alignSelf: "flex-start", paddingVertical: 8, paddingHorizontal: 14, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.1)" },
+  errorTryAgainText: { color: "#e5e5e5", fontSize: 14, fontWeight: "600" },
 });

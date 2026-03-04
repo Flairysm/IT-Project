@@ -6,6 +6,7 @@ import { useRouter } from "expo-router";
 import { useAuth } from "../auth-context";
 import { supabase } from "../lib/supabase";
 import { Ionicons } from "@expo/vector-icons";
+import { SubscriptionDiamond } from "../components/SubscriptionDiamond";
 import { Image } from "expo-image";
 
 type MemberInfo = { username: string; avatar_url?: string | null };
@@ -13,6 +14,8 @@ type GroupRow = {
   id: string;
   name: string;
   members: MemberInfo[];
+  /** Total people in group (accepted + pending). Use for "X members" label. */
+  memberCount: number;
   avatar_url?: string | null;
   isHost?: boolean;
 };
@@ -96,12 +99,14 @@ export default function GroupsScreen() {
           return amHost || amAccepted;
         })
         .map((g) => {
-          const acceptedOnly = (g.group_members || []).filter((gm) => (gm as Gm).status === "accepted");
+          const allMembers = g.group_members || [];
+          const acceptedOnly = allMembers.filter((gm) => (gm as Gm).status === "accepted");
           return {
             id: String(g.id),
             name: g.name,
             avatar_url: g.avatar_url ?? null,
             isHost: g.host_id === user.id,
+            memberCount: allMembers.length,
             members: acceptedOnly
               .map((gm) => {
                 const p = (gm as Gm).profiles;
@@ -212,10 +217,14 @@ export default function GroupsScreen() {
       if (groupErr) throw new Error(groupErr.message);
       const groupId = groupRow?.id;
       if (!groupId) throw new Error("Failed to create group");
-      await supabase.from("group_members").insert({ group_id: groupId, user_id: user.id, status: "accepted" });
-      for (const friendId of selectedMemberIds) {
-        await supabase.from("group_members").insert({ group_id: groupId, user_id: friendId, status: "pending" });
-      }
+
+      const memberRows = [
+        { group_id: groupId, user_id: user.id, status: "accepted" as const },
+        ...selectedMemberIds.map((friendId) => ({ group_id: groupId, user_id: friendId, status: "pending" as const })),
+      ];
+      const { error: membersErr } = await supabase.from("group_members").insert(memberRows);
+      if (membersErr) throw new Error(membersErr.message);
+
       setGroupName("");
       setSelectedMemberIds([]);
       setCreateModalVisible(false);
@@ -285,6 +294,7 @@ export default function GroupsScreen() {
       >
         <View style={styles.header}>
           <Text style={styles.title}>Groups</Text>
+          <SubscriptionDiamond />
         </View>
 
         <View style={styles.actionsRow}>
@@ -297,7 +307,23 @@ export default function GroupsScreen() {
         {loading ? (
           <Text style={styles.meta}>Loading...</Text>
         ) : error ? (
-          <Text style={styles.errorText}>{error}</Text>
+          <View style={styles.errorWrap}>
+            <View style={styles.errorRow}>
+              <Ionicons name="warning-outline" size={18} color="#fca5a5" />
+              <Text style={styles.errorText}>{error}</Text>
+              <Pressable onPress={() => setError(null)} style={styles.errorDismissIcon} hitSlop={8}>
+                <Ionicons name="close" size={20} color="#a3a3a3" />
+              </Pressable>
+            </View>
+            <View style={styles.errorActions}>
+              <Pressable onPress={() => setError(null)} style={({ pressed }) => [styles.errorBtn, pressed && styles.btnPressed]}>
+                <Text style={styles.errorBtnText}>Dismiss</Text>
+              </Pressable>
+              <Pressable onPress={() => { setError(null); void loadGroups(); }} style={({ pressed }) => [styles.errorBtn, styles.errorBtnRetry, pressed && styles.btnPressed]}>
+                <Text style={styles.errorBtnText}>Retry</Text>
+              </Pressable>
+            </View>
+          </View>
         ) : null}
 
         <View style={styles.tabRow}>
@@ -401,7 +427,7 @@ export default function GroupsScreen() {
                       <View style={styles.groupCardCenter}>
                         <Text style={styles.groupCardName} numberOfLines={1}>{g.name}</Text>
                         <Text style={styles.groupCardMeta}>
-                          {g.members.length} member{g.members.length !== 1 ? "s" : ""}
+                          {g.memberCount} member{g.memberCount !== 1 ? "s" : ""}
                         </Text>
                         <View style={styles.memberAvatarsRow}>
                           {g.members.slice(0, 5).map((m, i) => (
@@ -525,6 +551,9 @@ export default function GroupsScreen() {
               <View style={styles.modalErrorWrap}>
                 <Ionicons name="warning-outline" size={14} color="#fca5a5" />
                 <Text style={styles.modalError}>{error}</Text>
+                <Pressable onPress={() => setError(null)} style={styles.modalErrorDismiss} hitSlop={8}>
+                  <Ionicons name="close" size={18} color="#a3a3a3" />
+                </Pressable>
               </View>
             ) : null}
             <View style={styles.modalActions}>
@@ -580,7 +609,15 @@ const styles = StyleSheet.create({
   },
   primaryBtnText: { color: "#0a0a0a", fontSize: 16, fontWeight: "700" },
   meta: { color: "#737373", fontSize: 14, paddingHorizontal: 20, marginBottom: 12 },
-  errorText: { color: "#fca5a5", fontSize: 14, paddingHorizontal: 20, marginBottom: 12 },
+  errorWrap: { marginHorizontal: 20, marginBottom: 12, padding: 12, borderRadius: 12, backgroundColor: "rgba(252,165,165,0.12)", borderWidth: 1, borderColor: "rgba(252,165,165,0.2)" },
+  errorRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  errorText: { color: "#fca5a5", fontSize: 14, flex: 1 },
+  errorDismissIcon: { padding: 4 },
+  errorActions: { flexDirection: "row", gap: 10, marginTop: 10 },
+  errorBtn: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.1)" },
+  errorBtnRetry: { backgroundColor: "rgba(141,235,99,0.2)" },
+  errorBtnText: { color: "#e5e5e5", fontSize: 14, fontWeight: "600" },
+  btnPressed: { opacity: 0.8 },
   section: { marginBottom: 24 },
   sectionLabel: { color: "#e5e5e5", fontSize: 15, fontWeight: "700", marginBottom: 12, paddingHorizontal: 20 },
   allHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 20, marginBottom: 12 },
@@ -901,6 +938,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(252,165,165,0.2)",
   },
   modalError: { color: "#fca5a5", fontSize: 13, flex: 1 },
+  modalErrorDismiss: { padding: 4 },
   modalActions: { flexDirection: "row", gap: 12, marginTop: 8 },
   modalCancel: { flex: 1, paddingVertical: 14, borderRadius: 14, borderWidth: 1, borderColor: "rgba(255,255,255,0.2)", alignItems: "center" },
   modalCancelText: { color: "#e5e5e5", fontSize: 15, fontWeight: "600" },

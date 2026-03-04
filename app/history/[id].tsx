@@ -4,9 +4,12 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
+import * as ImagePicker from "expo-image-picker";
+import * as FileSystem from "expo-file-system";
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../auth-context";
 import { formatAmount } from "../lib/currency";
+import { checkRateLimit, RATE_LIMIT } from "../lib/rateLimit";
 
 function formatDisplayDate(dateStr: string | null): string {
   if (!dateStr) return "—";
@@ -46,6 +49,8 @@ type ReceiptDetail = {
   paid_members: string[];
   split_totals: SplitTotal[];
   image_url: string | null;
+  proof_required: boolean;
+  proofsByUsername: Record<string, { image_url: string }>;
 };
 
 export default function HistoryDetailScreen() {
@@ -59,7 +64,10 @@ export default function HistoryDetailScreen() {
   const [remindLoading, setRemindLoading] = useState<string | "all" | null>(null);
   const [remindMessage, setRemindMessage] = useState<string | null>(null);
   const [imageFullVisible, setImageFullVisible] = useState(false);
+  const [proofImageUrl, setProofImageUrl] = useState<string | null>(null);
   const [splitProfiles, setSplitProfiles] = useState<Record<string, SplitProfile>>({});
+  const [proofUploading, setProofUploading] = useState(false);
+  const [markSelfPaidLoading, setMarkSelfPaidLoading] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -68,7 +76,7 @@ export default function HistoryDetailScreen() {
     try {
       const { data: row, error } = await supabase
         .from("receipts")
-        .select("id, host_id, merchant, receipt_date, total_amount, paid, split_totals, paid_members, image_url")
+        .select("id, host_id, merchant, receipt_date, total_amount, paid, split_totals, paid_members, image_url, proof_required")
         .eq("id", id)
         .single();
       if (error) throw new Error(error.message);
@@ -91,6 +99,16 @@ export default function HistoryDetailScreen() {
       } else {
         amountDue = row.total_amount ? parseFloat(row.total_amount).toFixed(2) : "0.00";
       }
+      const { data: proofsRows } = await supabase
+        .from("receipt_proofs")
+        .select("username, image_url")
+        .eq("receipt_id", id);
+      const proofsByUsername: Record<string, { image_url: string }> = {};
+      (proofsRows || []).forEach((p: { username?: string; image_url?: string }) => {
+        const u = (p.username ?? "").trim();
+        if (u && p.image_url) proofsByUsername[u.toLowerCase()] = { image_url: p.image_url };
+      });
+
       setReceipt({
         id: String(row.id),
         host_id: row.host_id ?? null,
@@ -102,6 +120,8 @@ export default function HistoryDetailScreen() {
         paid_members: paidMembers,
         split_totals: splitTotals as SplitTotal[],
         image_url: row.image_url ?? null,
+        proof_required: row.proof_required !== false,
+        proofsByUsername,
       });
       const usernames = splitTotals.map((s: { name?: string }) => String(s?.name ?? "").trim()).filter(Boolean);
       if (usernames.length > 0) {
@@ -134,6 +154,10 @@ export default function HistoryDetailScreen() {
 
   const sendReminder = async (username?: string) => {
     if (!id) return;
+    if (!checkRateLimit("remind", RATE_LIMIT.remind)) {
+      setRemindMessage("Please wait a few seconds before sending another reminder.");
+      return;
+    }
     setRemindMessage(null);
     setRemindLoading(username ?? "all");
     try {
@@ -155,6 +179,82 @@ export default function HistoryDetailScreen() {
       setRemindMessage(e instanceof Error ? e.message : "Failed to send reminder");
     } finally {
       setRemindLoading(null);
+    }
+  };
+
+  const toggleProofRequired = async () => {
+    if (!id || !receipt || !isHost) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const { error } = await supabase
+        .from("receipts")
+        .update({ proof_required: !receipt.proof_required })
+        .eq("id", id);
+      if (error) throw new Error(error.message);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to update");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const markSelfPaid = async () => {
+    if (!id) return;
+    setMarkSelfPaidLoading(true);
+    setError(null);
+    try {
+      const { error } = await supabase.rpc("mark_self_paid", { p_receipt_id: id });
+      if (error) throw new Error(error.message);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to mark paid");
+    } finally {
+      setMarkSelfPaidLoading(false);
+    }
+  };
+
+  const submitProof = async () => {
+    if (!id || !profile?.username) return;
+    if (!checkRateLimit("submitProof", RATE_LIMIT.submitProof)) {
+      setError("Please wait a few seconds before submitting again.");
+      return;
+    }
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== "granted") {
+      setError("Permission to access photos is required.");
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsEditing: true,
+      aspect: [4, 3],
+      quality: 0.6,
+    });
+    const asset = result.assets?.[0];
+    if (result.canceled || !asset?.uri) return;
+    setProofUploading(true);
+    setError(null);
+    try {
+      const file = new FileSystem.File(asset.uri);
+      const base64 = await file.base64();
+      if (!base64 || typeof base64 !== "string") {
+        throw new Error("Could not read image");
+      }
+      const imageUrl = "data:image/jpeg;base64," + base64;
+      const { error } = await supabase
+        .from("receipt_proofs")
+        .upsert(
+          { receipt_id: id, username: profile.username.trim(), image_url: imageUrl },
+          { onConflict: "receipt_id,username" }
+        );
+      if (error) throw new Error(error.message);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to submit proof");
+    } finally {
+      setProofUploading(false);
     }
   };
 
@@ -205,8 +305,16 @@ export default function HistoryDetailScreen() {
 
       {error ? (
         <View style={styles.errorBlock}>
-          <Ionicons name="warning-outline" size={20} color="#fca5a5" />
-          <Text style={styles.errorText}>{error}</Text>
+          <View style={styles.errorBlockRow}>
+            <Ionicons name="warning-outline" size={20} color="#fca5a5" />
+            <Text style={styles.errorText}>{error}</Text>
+            <Pressable onPress={() => setError(null)} style={styles.errorDismissBtn} hitSlop={8}>
+              <Ionicons name="close" size={22} color="#a3a3a3" />
+            </Pressable>
+          </View>
+          <Pressable onPress={() => setError(null)} style={({ pressed }) => [styles.errorDismissButton, pressed && styles.btnPressed]}>
+            <Text style={styles.errorDismissButtonText}>Dismiss</Text>
+          </Pressable>
         </View>
       ) : null}
 
@@ -264,32 +372,46 @@ export default function HistoryDetailScreen() {
             <View style={styles.sectionHeader}>
               <Ionicons name="people-outline" size={18} color="#8DEB63" />
               <Text style={styles.sectionTitle}>Who paid how much</Text>
-              {isHost && !receipt.paid && receipt.split_totals?.some((r) => {
-                const unpaid = !receipt.paid_members?.includes(r.name);
-                const notHost = r.name.trim().toLowerCase() !== hostUsername;
-                return unpaid && notHost;
-              }) ? (
-                <Pressable
-                  onPress={() => void sendReminder()}
-                  disabled={remindLoading !== null}
-                  style={({ pressed }) => [styles.remindAllBtn, (remindLoading === "all" || pressed) && styles.btnPressed]}
-                >
-                  {remindLoading === "all" ? (
-                    <ActivityIndicator size="small" color="#0a0a0a" />
-                  ) : (
-                    <>
-                      <Ionicons name="notifications" size={16} color="#0a0a0a" />
-                      <Text style={styles.remindAllBtnText}>Remind all</Text>
-                    </>
-                  )}
-                </Pressable>
-              ) : null}
             </View>
+            {isHost && !receipt.paid && receipt.split_totals?.length ? (
+              <View style={styles.proofToggleRow}>
+                <Pressable
+                  onPress={() => void toggleProofRequired()}
+                  disabled={loading}
+                  style={({ pressed }) => [styles.proofToggleBtn, pressed && styles.btnPressed]}
+                >
+                  <Ionicons name={receipt.proof_required ? "document-attach" : "document-outline"} size={16} color="#8DEB63" />
+                  <Text style={styles.proofToggleBtnText}>{receipt.proof_required ? "Proof on" : "Proof off"}</Text>
+                </Pressable>
+                {receipt.split_totals?.some((r) => {
+                  const unpaid = !receipt.paid_members?.includes(r.name);
+                  const notHost = r.name.trim().toLowerCase() !== hostUsername;
+                  return unpaid && notHost;
+                }) ? (
+                  <Pressable
+                    onPress={() => void sendReminder()}
+                    disabled={remindLoading !== null}
+                    style={({ pressed }) => [styles.remindAllBtn, (remindLoading === "all" || pressed) && styles.btnPressed]}
+                  >
+                    {remindLoading === "all" ? (
+                      <ActivityIndicator size="small" color="#0a0a0a" />
+                    ) : (
+                      <>
+                        <Ionicons name="notifications" size={16} color="#0a0a0a" />
+                        <Text style={styles.remindAllBtnText}>Remind all</Text>
+                      </>
+                    )}
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : null}
             {receipt.split_totals?.length ? (
               <View style={styles.splitCard}>
                 {receipt.split_totals.map((row, idx) => {
                   const isHostRow = isHost && row.name.trim().toLowerCase() === hostUsername;
+                  const isOwerRow = !isHost && row.name.trim().toLowerCase() === hostUsername;
                   const rowPaid = receipt.paid_members?.includes(row.name);
+                  const hasProof = receipt.proof_required && receipt.proofsByUsername[row.name.trim().toLowerCase()];
                   const isLast = idx === receipt.split_totals!.length - 1;
                   const prof = splitProfiles[row.name.trim().toLowerCase()];
                   const displayName = (prof?.display_name ?? "").trim() || row.name;
@@ -312,12 +434,17 @@ export default function HistoryDetailScreen() {
                             <Text style={[styles.splitStatus, rowPaid ? styles.splitStatusPaid : styles.splitStatusUnpaid]}>
                               {rowPaid ? "Paid" : "Unpaid"}
                             </Text>
+                            {hasProof && !rowPaid ? (
+                              <Pressable onPress={() => receipt.proofsByUsername[row.name.trim().toLowerCase()] && setProofImageUrl(receipt.proofsByUsername[row.name.trim().toLowerCase()].image_url)}>
+                                <Text style={styles.proofBadge}>Proof sent · View</Text>
+                              </Pressable>
+                            ) : null}
                             {isHostRow ? <Text style={styles.hostBadge}>Host</Text> : null}
                           </View>
                         </View>
                       </View>
                       <View style={styles.splitRight}>
-                        <Text style={styles.splitAmount}>{formatAmount(Number(row.amount || 0), currencyCode)}</Text>
+                        <Text style={styles.splitAmount} numberOfLines={1}>{formatAmount(Number(row.amount || 0), currencyCode)}</Text>
                         {isHostRow ? (
                           <View style={styles.autoBadge}>
                             <Ionicons name="checkmark-done" size={14} color="#8DEB63" />
@@ -325,34 +452,58 @@ export default function HistoryDetailScreen() {
                           </View>
                         ) : isHost ? (
                           <View style={styles.splitActions}>
-                            {!rowPaid ? (
+                            {rowPaid ? (
                               <Pressable
-                                onPress={() => void sendReminder(row.name)}
-                                disabled={remindLoading !== null}
-                                style={({ pressed }) => [styles.remindOneBtn, (remindLoading === row.name || pressed) && styles.btnPressed]}
+                                onPress={() => void togglePaidForUser(row.name)}
+                                style={({ pressed }) => [styles.toggleBtn, styles.toggleBtnPaid, pressed && styles.btnPressed]}
                               >
-                                {remindLoading === row.name ? (
-                                  <ActivityIndicator size="small" color="#8DEB63" />
-                                ) : (
-                                  <>
-                                    <Ionicons name="notifications-outline" size={14} color="#8DEB63" />
-                                    <Text style={styles.remindOneBtnText}>Remind</Text>
-                                  </>
-                                )}
+                                <Text style={[styles.toggleBtnText, styles.toggleBtnTextPaid]}>Mark unpaid</Text>
                               </Pressable>
-                            ) : null}
-                            <Pressable
-                              onPress={() => void togglePaidForUser(row.name)}
-                              style={({ pressed }) => [
-                                styles.toggleBtn,
-                                rowPaid && styles.toggleBtnPaid,
-                                pressed && styles.btnPressed,
-                              ]}
-                            >
-                              <Text style={[styles.toggleBtnText, rowPaid && styles.toggleBtnTextPaid]}>
-                                {rowPaid ? "Mark unpaid" : "Mark paid"}
-                              </Text>
-                            </Pressable>
+                            ) : receipt.proof_required && !hasProof ? (
+                              <Text style={styles.awaitingProofText}>Awaiting proof</Text>
+                            ) : (
+                              <>
+                                <Pressable
+                                  onPress={() => void sendReminder(row.name)}
+                                  disabled={remindLoading !== null}
+                                  style={({ pressed }) => [styles.remindOneBtn, (remindLoading === row.name || pressed) && styles.btnPressed]}
+                                >
+                                  {remindLoading === row.name ? <ActivityIndicator size="small" color="#8DEB63" /> : <><Ionicons name="notifications-outline" size={14} color="#8DEB63" /><Text style={styles.remindOneBtnText}>Remind</Text></>}
+                                </Pressable>
+                                <Pressable
+                                  onPress={() => void togglePaidForUser(row.name)}
+                                  style={({ pressed }) => [styles.toggleBtn, pressed && styles.btnPressed]}
+                                >
+                                  <Text style={styles.toggleBtnText}>Mark paid</Text>
+                                </Pressable>
+                              </>
+                            )}
+                          </View>
+                        ) : isOwerRow ? (
+                          <View style={styles.splitActions}>
+                            {rowPaid ? (
+                              <Text style={[styles.splitStatusReadOnly, styles.splitStatusPaid]}>Paid</Text>
+                            ) : receipt.proof_required ? (
+                              hasProof ? (
+                                <Text style={styles.proofSubmittedText}>Proof submitted</Text>
+                              ) : (
+                                <Pressable
+                                  onPress={() => void submitProof()}
+                                  disabled={proofUploading}
+                                  style={({ pressed }) => [styles.submitProofBtn, (proofUploading || pressed) && styles.btnPressed]}
+                                >
+                                  {proofUploading ? <ActivityIndicator size="small" color="#0a0a0a" /> : <><Ionicons name="camera" size={14} color="#0a0a0a" /><Text style={styles.submitProofBtnText}>Submit proof</Text></>}
+                                </Pressable>
+                              )
+                            ) : (
+                              <Pressable
+                                onPress={() => void markSelfPaid()}
+                                disabled={markSelfPaidLoading}
+                                style={({ pressed }) => [styles.markSelfPaidBtn, (markSelfPaidLoading || pressed) && styles.btnPressed]}
+                              >
+                                {markSelfPaidLoading ? <ActivityIndicator size="small" color="#0a0a0a" /> : <Text style={styles.markSelfPaidBtnText}>I've paid</Text>}
+                              </Pressable>
+                            )}
                           </View>
                         ) : (
                           <Text style={[styles.splitStatusReadOnly, rowPaid ? styles.splitStatusPaid : styles.splitStatusUnpaid]}>
@@ -381,21 +532,23 @@ export default function HistoryDetailScreen() {
         </ScrollView>
 
         <Modal
-          visible={imageFullVisible}
+          visible={imageFullVisible || !!proofImageUrl}
           transparent
           animationType="fade"
-          onRequestClose={() => setImageFullVisible(false)}
+          onRequestClose={() => { setImageFullVisible(false); setProofImageUrl(null); }}
         >
-          <Pressable style={styles.imageFullBackdrop} onPress={() => setImageFullVisible(false)}>
+          <Pressable style={styles.imageFullBackdrop} onPress={() => { setImageFullVisible(false); setProofImageUrl(null); }}>
             <View style={styles.imageFullContent}>
               <Pressable
-                onPress={() => setImageFullVisible(false)}
+                onPress={() => { setImageFullVisible(false); setProofImageUrl(null); }}
                 style={styles.imageFullClose}
                 hitSlop={16}
               >
                 <Ionicons name="close" size={28} color="#fff" />
               </Pressable>
-              {receipt?.image_url ? (
+              {proofImageUrl ? (
+                <Image source={{ uri: proofImageUrl }} style={styles.imageFullImage} resizeMode="contain" />
+              ) : receipt?.image_url ? (
                 <Image
                   source={{ uri: receipt.image_url }}
                   style={styles.imageFullImage}
@@ -420,9 +573,6 @@ const styles = StyleSheet.create({
   editBtn: { width: 44, height: 44, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(141,235,99,0.15)" },
   title: { flex: 1, color: "#fff", fontSize: 20, fontWeight: "800", textAlign: "center" },
   errorBlock: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
     marginHorizontal: 16,
     marginBottom: 12,
     padding: 14,
@@ -431,7 +581,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(252,165,165,0.25)",
   },
+  errorBlockRow: { flexDirection: "row", alignItems: "center", gap: 10 },
   errorText: { color: "#fca5a5", fontSize: 14, flex: 1 },
+  errorDismissBtn: { padding: 4 },
+  errorDismissButton: { alignSelf: "flex-start", marginTop: 10, paddingVertical: 8, paddingHorizontal: 14, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.1)" },
+  errorDismissButtonText: { color: "#e5e5e5", fontSize: 14, fontWeight: "600" },
   loadingBlock: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12, paddingVertical: 48 },
   loadingText: { color: "#737373", fontSize: 15 },
   scroll: { flex: 1 },
@@ -581,8 +735,21 @@ const styles = StyleSheet.create({
   },
   remindMessageText: { color: "#8DEB63", fontSize: 14, fontWeight: "600", flex: 1 },
   section: { marginBottom: 24 },
-  sectionHeader: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 12 },
+  sectionHeader: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 8 },
   sectionTitle: { color: "#e5e5e5", fontSize: 17, fontWeight: "700", flex: 1 },
+  proofToggleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
+  proofToggleBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: "rgba(141,235,99,0.15)",
+    borderWidth: 1,
+    borderColor: "rgba(141,235,99,0.3)",
+  },
+  proofToggleBtnText: { color: "#8DEB63", fontSize: 12, fontWeight: "700" },
   remindAllBtn: {
     flexDirection: "row",
     alignItems: "center",
@@ -593,7 +760,6 @@ const styles = StyleSheet.create({
     backgroundColor: "#8DEB63",
   },
   remindAllBtnText: { color: "#0a0a0a", fontSize: 13, fontWeight: "700" },
-  splitActions: { flexDirection: "row", alignItems: "center", gap: 8 },
   remindOneBtn: {
     flexDirection: "row",
     alignItems: "center",
@@ -615,30 +781,31 @@ const styles = StyleSheet.create({
   },
   splitRow: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     justifyContent: "space-between",
-    paddingVertical: 16,
-    paddingHorizontal: 18,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
     borderBottomWidth: 1,
     borderBottomColor: "rgba(255,255,255,0.06)",
+    gap: 12,
   },
   splitRowLast: { borderBottomWidth: 0 },
-  splitLeft: { flex: 1, minWidth: 0, marginRight: 12, flexDirection: "row", alignItems: "center", gap: 12 },
-  splitAvatarWrap: { width: 44, height: 44, borderRadius: 22 },
-  splitAvatar: { width: 44, height: 44, borderRadius: 22 },
+  splitLeft: { flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 12 },
+  splitAvatarWrap: { width: 40, height: 40, borderRadius: 20 },
+  splitAvatar: { width: 40, height: 40, borderRadius: 20 },
   splitAvatarPlaceholder: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: "rgba(141,235,99,0.2)",
     alignItems: "center",
     justifyContent: "center",
   },
-  splitAvatarInitial: { color: "#8DEB63", fontSize: 16, fontWeight: "800" },
-  splitNameBlock: { flex: 1, minWidth: 0 },
-  splitName: { color: "#fff", fontSize: 16, fontWeight: "700", marginBottom: 2 },
-  splitUsernameTag: { color: "#737373", fontSize: 13, marginBottom: 4 },
-  splitMetaRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  splitAvatarInitial: { color: "#8DEB63", fontSize: 14, fontWeight: "800" },
+  splitNameBlock: { flex: 1, minWidth: 0, justifyContent: "center" },
+  splitName: { color: "#fff", fontSize: 15, fontWeight: "700", marginBottom: 1 },
+  splitUsernameTag: { color: "#737373", fontSize: 12, marginBottom: 4 },
+  splitMetaRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 6, marginTop: 2 },
   splitStatus: { fontSize: 13, fontWeight: "600" },
   splitStatusPaid: { color: "#8DEB63" },
   splitStatusUnpaid: { color: "#fbbf24" },
@@ -653,14 +820,48 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     overflow: "hidden",
   },
-  splitRight: { alignItems: "flex-end", gap: 8 },
-  splitAmount: { color: "#8DEB63", fontSize: 17, fontWeight: "800" },
-  autoBadge: { flexDirection: "row", alignItems: "center", gap: 4 },
-  autoBadgeText: { color: "#8DEB63", fontSize: 13, fontWeight: "600" },
-  toggleBtn: {
+  proofBadge: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#a78bfa",
+    backgroundColor: "rgba(167,139,250,0.2)",
+    paddingVertical: 2,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+  },
+  awaitingProofText: { color: "#737373", fontSize: 12, fontStyle: "italic" },
+  proofSubmittedText: { color: "#8DEB63", fontSize: 13, fontWeight: "600" },
+  submitProofBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
     paddingVertical: 8,
     paddingHorizontal: 14,
     borderRadius: 10,
+    backgroundColor: "#8DEB63",
+  },
+  submitProofBtnText: { color: "#0a0a0a", fontSize: 13, fontWeight: "700" },
+  markSelfPaidBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    backgroundColor: "#8DEB63",
+  },
+  markSelfPaidBtnText: { color: "#0a0a0a", fontSize: 13, fontWeight: "700" },
+  splitRight: {
+    flexShrink: 0,
+    alignItems: "flex-end",
+    justifyContent: "flex-start",
+    gap: 6,
+  },
+  splitAmount: { color: "#8DEB63", fontSize: 16, fontWeight: "800" },
+  autoBadge: { flexDirection: "row", alignItems: "center", gap: 4 },
+  autoBadgeText: { color: "#8DEB63", fontSize: 12, fontWeight: "600" },
+  splitActions: { flexDirection: "row", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center", gap: 6 },
+  toggleBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 8,
     backgroundColor: "rgba(141,235,99,0.2)",
     borderWidth: 1,
     borderColor: "rgba(141,235,99,0.35)",
