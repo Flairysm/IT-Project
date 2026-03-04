@@ -47,6 +47,10 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "ezsplit-ocr" });
 });
 
+app.get("/", (_req, res) => {
+  res.json({ ok: true, service: "ezsplit-ocr", message: "Use POST /ocr with imageBase64 for receipt scanning. GET /health for health check." });
+});
+
 let sharedTesseractWorker = null;
 let sharedTesseractWorkerPromise = null;
 async function getTesseractWorker() {
