@@ -1,0 +1,9 @@
+# EAS Build: exclude files not needed for the app build (smaller upload, fewer install issues)
+ocr-server/
+docs/
+.git/
+*.md
+!README.md
+.env
+.env.*
+*.pem

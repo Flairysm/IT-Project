@@ -10,7 +10,7 @@ const heicConvert = require("heic-convert");
 const sharp = require("sharp");
 const { Pool } = require("pg");
 
-const OCR_MAX_IMAGE_PX = Number(process.env.OCR_MAX_IMAGE_PX) || 1200;
+const OCR_MAX_IMAGE_PX = Number(process.env.OCR_MAX_IMAGE_PX) || 1024;
 
 const app = express();
 app.use(cors());
@@ -100,7 +100,7 @@ async function normalizeImagePayload(imageBase64) {
     if (w > OCR_MAX_IMAGE_PX || h > OCR_MAX_IMAGE_PX) {
       buffer = await sharp(buffer)
         .resize(OCR_MAX_IMAGE_PX, OCR_MAX_IMAGE_PX, { fit: "inside", withoutEnlargement: true })
-        .jpeg({ quality: 88 })
+        .jpeg({ quality: 78 })
         .toBuffer();
     }
   } catch (e) {

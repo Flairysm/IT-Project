@@ -1,7 +1,8 @@
-// Use cloud URL when set (e.g. EXPO_PUBLIC_OCR_URL=https://ezsplit-ocr.onrender.com); else local/dev.
+// Use EXPO_PUBLIC_OCR_URL when set (EAS production sets this). Default to cloud so app works on hotspot/cellular too.
+const CLOUD_OCR_URL = "https://ezsplit-ocr.onrender.com";
 export const OCR_SERVER_URL =
   (typeof process !== "undefined" && (process as unknown as { env?: Record<string, string> }).env?.EXPO_PUBLIC_OCR_URL) ||
-  "http://192.168.1.60:3080";
+  CLOUD_OCR_URL;
 
 // Optional: same value as OCR_API_KEY on the server; sent in x-api-key for cloud OCR.
 export const OCR_API_KEY =

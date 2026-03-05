@@ -1,12 +1,13 @@
 {
   "expo": {
     "name": "EZSplit",
-    "slug": "ezsplit",
-    "version": "1.0.0",
+    "slug": "it-project",
+    "version": "1.0.1",
     "orientation": "portrait",
     "scheme": "ezsplit",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
+    "icon": "./assets/EZSplitLogo.png",
     "splash": {
       "image": "./assets/EZSplitSplash.png",
       "resizeMode": "contain",
@@ -17,11 +18,18 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.ezsplit.app"
+      "bundleIdentifier": "com.flairysm.ezsplit",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
-      "package": "com.ezsplit.app",
-      "usesCleartextTraffic": true
+      "package": "com.flairysm.ezsplit",
+      "usesCleartextTraffic": true,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/EZSplitLogo.png",
+        "backgroundColor": "#0b100b"
+      }
     },
     "plugins": [
       "expo-router",

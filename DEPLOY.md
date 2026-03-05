@@ -35,6 +35,11 @@ Receipt scanning in the app needs a live OCR server. Your project is set to use 
 7. Open `https://ezsplit-ocr.onrender.com` in a browser. You should see a response or “OK” (not an error).  
    If your service name is different, note the URL and update **Step 5** (EAS build) to use that URL.
 
+8. **Enable accurate extraction (OpenAI Vision):** Without this, the server uses Tesseract-only OCR and details (merchant, items, totals) are often wrong. In Render → your **ezsplit-ocr** service → **Environment** → **Add Environment Variable**:
+   - **Key:** `OPENAI_API_KEY`
+   - **Value:** your OpenAI API key (starts with `sk-`; get one at [platform.openai.com](https://platform.openai.com/api-keys))
+   Save and let the service redeploy. After that, receipt extraction uses GPT-4 Vision and is much more accurate.
+
 (Optional) To lock the API: in Render → Service → Environment, add `OCR_API_KEY` and set a secret. Then add the same value as an EAS secret `EXPO_PUBLIC_OCR_API_KEY` so the app can call the server.
 
 ---
@@ -74,7 +79,7 @@ Save both URLs; you’ll add them in App Store Connect (Step 6).
    - **Platform**: iOS.
    - **Name**: EZSplit.
    - **Primary language**: your choice.
-   - **Bundle ID**: select or create `com.ezsplit.app` (must match `app.json`).
+   - **Bundle ID**: select or create `com.flairysm.ezsplit` (must match `app.json`).
    - **SKU**: e.g. `ezsplit-1`.
 4. Create the app. You’ll add version, description, and URLs in the next steps.
 
@@ -88,6 +93,7 @@ Your project already has **production** and **preview** profiles in `eas.json` w
    ```bash
    cd "/Users/bryant/Documents/IT Project"
    eas build --platform ios --profile production
+   eas submit --platform ios
    ```
 2. First time:
    - EAS may ask to create the project or link to an existing one; confirm.
@@ -147,6 +153,7 @@ Then run the build again (or use the same command; EAS injects secrets into the 
 ## Step 8: After deployment
 
 - **OCR**: Uses `https://ezsplit-ocr.onrender.com` (or the URL you set). Ensure the Render service stays running and the URL is reachable.
+- **Faster scanning (aim for 5–10s):** (1) Set `OPENAI_API_KEY` on Render so the server uses GPT-4 Vision (faster and more accurate than Tesseract). (2) Keep the service warm: on Render free tier, the first request after idle can take 30–60s (cold start). Use a free cron (e.g. [cron-job.org](https://cron-job.org) or [UptimeRobot](https://uptimerobot.com)) to hit `GET https://ezsplit-ocr.onrender.com/health` every 10–14 minutes so the server stays warm. (3) The app resizes and compresses images on device before upload; the server uses a 1024px max for processing—both help speed.
 - **Notifications**: Users enable them in the app (Settings → Notifications). Reminders work if APNs was set up (EAS usually does this when you built with “Let EAS handle it” and allowed push).
 - **Updates**: Change version in `app.json` if needed, then run `eas build --platform ios --profile production` again and submit a new build in App Store Connect.
 
@@ -159,7 +166,7 @@ Then run the build again (or use the same command; EAS injects secrets into the 
 | 1 | Apple Developer, Expo account, EAS CLI, splash/logo assets |
 | 2 | Deploy OCR server to Render → `https://ezsplit-ocr.onrender.com` |
 | 3 | Host `docs/privacy-policy.html` and `terms-of-service.html` (e.g. GitHub Pages) |
-| 4 | Create app in App Store Connect (Bundle ID: `com.ezsplit.app`) |
+| 4 | Create app in App Store Connect (Bundle ID: `com.flairysm.ezsplit`) |
 | 5 | Run `eas build --platform ios --profile production` |
 | 6 | In App Store Connect: add Privacy & Terms URLs, description, screenshots, app privacy |
 | 7 | Submit build from EAS or App Store Connect → TestFlight / App Store → Submit for Review |

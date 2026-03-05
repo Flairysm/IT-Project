@@ -1,6 +1,7 @@
 {
   "cli": {
-    "version": ">= 5.0.0"
+    "version": ">= 5.0.0",
+    "appVersionSource": "remote"
   },
   "build": {
     "development": {
@@ -26,20 +27,11 @@
     "production": {
       "autoIncrement": true,
       "ios": {
-        "resourceClass": "m1-medium"
+        "resourceClass": "m-medium"
       },
       "env": {
         "EXPO_PUBLIC_OCR_URL": "https://ezsplit-ocr.onrender.com",
-        "EXPO_PUBLIC_OCR_API_KEY": ""
-      }
-    }
-  },
-  "submit": {
-    "production": {
-      "ios": {
-        "appleId": "",
-        "ascAppId": "",
-        "appleTeamId": ""
+        "NPM_CONFIG_LEGACY_PEER_DEPS": "true"
       }
     }
   }

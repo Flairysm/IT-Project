@@ -22,12 +22,12 @@ export async function fetchWithTimeout(
     if (e instanceof Error) {
       if (e.name === "AbortError") {
         throw new Error(
-          "Request timed out. Make sure the OCR server is running (npm run ocr) and your device is on the same Wi‑Fi as your computer. If your computer's IP changed, update OCR_SERVER_URL in app/config.ts."
+          "Request timed out. On mobile data or hotspot the server may take a moment to wake up—try again. Check your connection if it keeps failing."
         );
       }
       if (/network|timed out|timeout|failed to fetch/i.test(e.message)) {
         throw new Error(
-          "Cannot reach server. Check that the OCR server is running and your device is on the same Wi‑Fi. Update OCR_SERVER_URL in app/config.ts if your computer's IP changed."
+          "Cannot reach the server. Check your internet connection and try again. On mobile data or hotspot, the first request can take longer."
         );
       }
     }

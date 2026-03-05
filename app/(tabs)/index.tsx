@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Modal, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, Image as RNImage, Modal, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { useFocusEffect, useRouter } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
 import * as FileSystem from "expo-file-system";
+import * as ImageManipulator from "expo-image-manipulator";
 import { Image } from "expo-image";
 import { Ionicons } from "@expo/vector-icons";
 import { OCR_API_KEY, OCR_SERVER_URL } from "../config";
+import { fetchWithTimeout } from "../lib/fetchWithTimeout";
 import { useAuth } from "../auth-context";
 import { supabase } from "../lib/supabase";
 import { CURRENCIES, formatAmount, getCurrency } from "../lib/currency";
@@ -277,14 +279,31 @@ export default function HomeScreen() {
     setLoading(true);
     setError(null);
     try {
-      const file = new FileSystem.File(imageUri);
-      const base64 = await file.base64();
+      // Resize and compress on device for faster upload and server processing (target 5–10s)
+      const maxPx = 1024;
+      const getSize = (): Promise<{ width: number; height: number }> =>
+        new Promise((resolve, reject) => {
+          RNImage.getSize(imageUri, (w, h) => resolve({ width: w, height: h }), reject);
+        });
+      const { width, height } = await getSize();
+      const actions: ImageManipulator.Action[] =
+        Math.max(width, height) > maxPx
+          ? [{ resize: { width: Math.round((width * maxPx) / Math.max(width, height)), height: Math.round((height * maxPx) / Math.max(width, height)) } }]
+          : [];
+      const manipulated = await ImageManipulator.manipulateAsync(imageUri, actions, {
+        compress: 0.65,
+        format: ImageManipulator.SaveFormat.JPEG,
+        base64: true,
+      });
+      const base64 = manipulated.base64 ?? (await new FileSystem.File(manipulated.uri).base64());
+
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (OCR_API_KEY) headers["x-api-key"] = OCR_API_KEY;
-      const res = await fetch(`${OCR_SERVER_URL}/ocr`, {
+      const res = await fetchWithTimeout(`${OCR_SERVER_URL}/ocr`, {
         method: "POST",
         headers,
         body: JSON.stringify({ imageBase64: base64 }),
+        timeoutMs: 90000,
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "OCR failed");
