@@ -1,10 +1,18 @@
+export type SettleUpEntry = {
+  paid_by: string;
+  amount: number;
+  split_among: string[];
+  /** Optional: user_id -> percentage (0–100). If absent, split is equal among split_among. */
+  split_percentages?: Record<string, number> | null;
+};
+
 /**
  * Compute minimal "who pays whom" settlement from expense entries.
  * Members and entries must match the same expense group.
  */
 export function computeSettleUp(
   memberIds: string[],
-  entries: { paid_by: string; amount: number; split_among: string[] }[]
+  entries: SettleUpEntry[]
 ): { from: string; to: string; amount: number }[] {
   const ids = [...memberIds];
   const amountPaid: Record<string, number> = Object.fromEntries(ids.map((id) => [id, 0]));
@@ -12,10 +20,28 @@ export function computeSettleUp(
 
   for (const e of entries) {
     amountPaid[e.paid_by] = (amountPaid[e.paid_by] ?? 0) + e.amount;
-    const n = e.split_among.length || 1;
-    const each = e.amount / n;
-    for (const id of e.split_among) {
-      if (ids.includes(id)) share[id] = (share[id] ?? 0) + each;
+    const among = e.split_among.length ? e.split_among : [...ids];
+    const pct = e.split_percentages && Object.keys(e.split_percentages).length > 0
+      ? e.split_percentages
+      : null;
+    if (pct) {
+      let totalPct = 0;
+      for (const id of among) {
+        if (ids.includes(id)) totalPct += pct[id] ?? 0;
+      }
+      const scale = totalPct > 0 ? 100 / totalPct : 1 / among.length;
+      for (const id of among) {
+        if (ids.includes(id)) {
+          const frac = ((pct[id] ?? 0) * scale) / 100;
+          share[id] = (share[id] ?? 0) + e.amount * frac;
+        }
+      }
+    } else {
+      const n = among.length || 1;
+      const each = e.amount / n;
+      for (const id of among) {
+        if (ids.includes(id)) share[id] = (share[id] ?? 0) + each;
+      }
     }
   }
 

@@ -256,11 +256,11 @@ export default function HomeScreen() {
         return;
       }
       const groupIds = (groups as { id: string }[]).map((g) => g.id);
-      const { data: entries } = await supabase.from("expense_entries").select("group_id, paid_by, amount, split_among, settled").in("group_id", groupIds);
+      const { data: entries } = await supabase.from("expense_entries").select("group_id, paid_by, amount, split_among, settled, split_percentages").in("group_id", groupIds);
       const { data: mems } = await supabase.from("expense_group_members").select("group_id, user_id").in("group_id", groupIds);
 
       const membersByGroup: Record<string, string[]> = {};
-      const entriesByGroup: Record<string, { paid_by: string; amount: number; split_among: string[] }[]> = {};
+      const entriesByGroup: Record<string, { paid_by: string; amount: number; split_among: string[]; split_percentages?: Record<string, number> | null }[]> = {};
       for (const id of groupIds) {
         membersByGroup[id] = [];
         entriesByGroup[id] = [];
@@ -272,9 +272,9 @@ export default function HomeScreen() {
       }
       for (const e of entries ?? []) {
         const gid = (e as { group_id: string }).group_id;
-        const row = e as { paid_by: string; amount: number; split_among: string[]; settled?: boolean };
+        const row = e as { paid_by: string; amount: number; split_among: string[]; settled?: boolean; split_percentages?: Record<string, number> | null };
         if (row.settled) continue;
-        if (entriesByGroup[gid]) entriesByGroup[gid].push({ paid_by: row.paid_by, amount: Number(row.amount), split_among: Array.isArray(row.split_among) ? row.split_among : [] });
+        if (entriesByGroup[gid]) entriesByGroup[gid].push({ paid_by: row.paid_by, amount: Number(row.amount), split_among: Array.isArray(row.split_among) ? row.split_among : [], split_percentages: row.split_percentages ?? null });
       }
 
       const owedToMe: OwedToYouItem[] = [];

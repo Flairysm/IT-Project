@@ -27,7 +27,7 @@ function initial(name: string): string {
   const s = (name || "").trim();
   return s ? s.charAt(0).toUpperCase() : "?";
 }
-type ExpenseEntry = { id: string; paid_by: string; amount: number; description: string; split_among: string[]; settled?: boolean };
+type ExpenseEntry = { id: string; paid_by: string; amount: number; description: string; split_among: string[]; settled?: boolean; split_percentages?: Record<string, number> | null };
 
 export default function ExpenseGroupScreen() {
   const { category, groupId: paramGroupId } = useLocalSearchParams<{ category: string; groupId?: string }>();
@@ -65,6 +65,11 @@ export default function ExpenseGroupScreen() {
   const [selectedIdsAddMember, setSelectedIdsAddMember] = useState<string[]>([]);
   const [addingMembers, setAddingMembers] = useState(false);
   const [leavingGroup, setLeavingGroup] = useState(false);
+  type ExpenseSplitMode = "equal" | "percentage" | "amount" | "shares";
+  const [expenseSplitMode, setExpenseSplitMode] = useState<ExpenseSplitMode>("equal");
+  const [expenseSplitDraft, setExpenseSplitDraft] = useState<Record<string, string>>({});
+  type ExpenseModalPanel = "main" | "splitAmong" | "howToSplit";
+  const [expenseModalPanel, setExpenseModalPanel] = useState<ExpenseModalPanel>("main");
 
   const myId = user?.id ?? "";
   const memberIds = useMemo(() => members.map((m) => m.id), [members]);
@@ -125,15 +130,16 @@ export default function ExpenseGroupScreen() {
         return { id, username: p?.username ?? "?", avatar_url: p?.avatar_url ?? null };
       }));
 
-      const { data: ents } = await supabase.from("expense_entries").select("id, paid_by, amount, description, split_among, settled").eq("group_id", paramGroupId).order("created_at", { ascending: true });
+      const { data: ents } = await supabase.from("expense_entries").select("id, paid_by, amount, description, split_among, settled, split_percentages").eq("group_id", paramGroupId).order("created_at", { ascending: true });
       setEntries(
-        (ents ?? []).map((e: { id: string; paid_by: string; amount: number; description: string; split_among: string[]; settled?: boolean }) => ({
+        (ents ?? []).map((e: { id: string; paid_by: string; amount: number; description: string; split_among: string[]; settled?: boolean; split_percentages?: Record<string, number> | null }) => ({
           id: e.id,
           paid_by: e.paid_by,
           amount: Number(e.amount),
           description: e.description ?? "",
           split_among: Array.isArray(e.split_among) ? e.split_among : [],
           settled: Boolean(e.settled),
+          split_percentages: e.split_percentages && typeof e.split_percentages === "object" ? e.split_percentages : null,
         }))
       );
     } catch (e) {
@@ -185,6 +191,91 @@ export default function ExpenseGroupScreen() {
     }
   };
 
+  const toSplitAmongInModal = splitAmongIds.length > 0 ? splitAmongIds : memberIds;
+
+  const switchExpenseSplitMode = (mode: ExpenseSplitMode) => {
+    setExpenseSplitMode(mode);
+    const among = toSplitAmongInModal;
+    if (mode === "equal") {
+      setExpenseSplitDraft({});
+      return;
+    }
+    const n = among.length || 1;
+    const amt = parseFloat(amountInput.replace(/,/g, "")) || 0;
+    const draft: Record<string, string> = {};
+    if (mode === "percentage") {
+      among.forEach((id) => { draft[id] = (100 / n).toFixed(1); });
+    } else if (mode === "amount") {
+      among.forEach((id) => { draft[id] = (amt / n).toFixed(2); });
+    } else {
+      among.forEach((id) => { draft[id] = "1"; });
+    }
+    setExpenseSplitDraft(draft);
+  };
+
+  const expenseSplitDraftTotal = useMemo(() => {
+    const among = toSplitAmongInModal;
+    if (expenseSplitMode === "percentage") {
+      return among.reduce((s, id) => s + (parseFloat(expenseSplitDraft[id] ?? "0") || 0), 0);
+    }
+    if (expenseSplitMode === "amount") {
+      return among.reduce((s, id) => s + (parseFloat(expenseSplitDraft[id] ?? "0") || 0), 0);
+    }
+    if (expenseSplitMode === "shares") {
+      return among.reduce((s, id) => s + (parseInt(expenseSplitDraft[id] ?? "0", 10) || 0), 0);
+    }
+    return 0;
+  }, [expenseSplitMode, expenseSplitDraft, toSplitAmongInModal]);
+
+  const expenseAmount = parseFloat(amountInput.replace(/,/g, "")) || 0;
+
+  const howToSplitButtonLabel = useMemo(() => {
+    if (expenseSplitMode === "equal") return "Equal";
+    const among = toSplitAmongInModal;
+    if (among.length === 0) return "Equal";
+    if (expenseSplitMode === "percentage") {
+      const pcts = among.map((id) => parseFloat(expenseSplitDraft[id] ?? "0") || 0);
+      return pcts.every((p) => p > 0) ? pcts.map((p) => `${Math.round(p)}%`).join(" / ") : "Custom %";
+    }
+    if (expenseSplitMode === "amount") return `Custom amount`;
+    if (expenseSplitMode === "shares") return `Shares`;
+    return "Equal";
+  }, [expenseSplitMode, expenseSplitDraft, toSplitAmongInModal]);
+
+  const buildSplitPercentagesFromModal = (): Record<string, number> | null => {
+    const among = toSplitAmongInModal;
+    if (among.length === 0) return null;
+    if (expenseSplitMode === "equal") return null;
+    const amt = parseFloat(amountInput.replace(/,/g, "")) || 0;
+    if (expenseSplitMode === "percentage") {
+      const pcts = among.map((id) => Math.max(0, parseFloat(expenseSplitDraft[id] ?? "0") || 0));
+      const sum = pcts.reduce((a, b) => a + b, 0);
+      if (sum < 0.01) return null;
+      const scale = 100 / sum;
+      const out: Record<string, number> = {};
+      among.forEach((id, i) => { out[id] = Math.round(pcts[i]! * scale * 100) / 100; });
+      return out;
+    }
+    if (expenseSplitMode === "amount") {
+      const amounts = among.map((id) => Math.max(0, parseFloat(expenseSplitDraft[id] ?? "0") || 0));
+      const sum = amounts.reduce((a, b) => a + b, 0);
+      if (sum < 0.01 || amt < 0.01) return null;
+      const scale = 100 / amt;
+      const out: Record<string, number> = {};
+      among.forEach((id, i) => { out[id] = Math.round(amounts[i]! * scale * 100) / 100; });
+      return out;
+    }
+    if (expenseSplitMode === "shares") {
+      const shares = among.map((id) => Math.max(0, parseInt(expenseSplitDraft[id] ?? "0", 10) || 0));
+      const totalShares = shares.reduce((a, b) => a + b, 0);
+      if (totalShares < 1) return null;
+      const out: Record<string, number> = {};
+      among.forEach((id, i) => { out[id] = Math.round((shares[i]! / totalShares) * 10000) / 100; });
+      return out;
+    }
+    return null;
+  };
+
   const addEntry = async () => {
     if (!groupId || !paidBy || members.length === 0) return;
     const toSplitAmong = splitAmongIds.length > 0 ? splitAmongIds : memberIds;
@@ -197,21 +288,40 @@ export default function ExpenseGroupScreen() {
       setError("Enter a valid amount.");
       return;
     }
+    if (expenseSplitMode !== "equal") {
+      if (expenseSplitMode === "percentage") {
+        const sum = toSplitAmong.reduce((s, id) => s + (parseFloat(expenseSplitDraft[id] ?? "0") || 0), 0);
+        if (Math.abs(sum - 100) > 0.5) {
+          setError("Percentages must total 100%.");
+          return;
+        }
+      }
+      if (expenseSplitMode === "amount") {
+        const sum = toSplitAmong.reduce((s, id) => s + (parseFloat(expenseSplitDraft[id] ?? "0") || 0), 0);
+        if (Math.abs(sum - amount) > 0.02) {
+          setError(`Amounts must total ${getCurrency(currencyCode).symbol}${amount.toFixed(2)}.`);
+          return;
+        }
+      }
+    }
+    const splitPct = buildSplitPercentagesFromModal();
     setSaving(true);
     setError(null);
     try {
       const { data: row, error: e1 } = await supabase
         .from("expense_entries")
-        .insert({ group_id: groupId, paid_by: paidBy, amount, description: descInput.trim() || "Expense", split_among: toSplitAmong })
-        .select("id, paid_by, amount, description, split_among")
+        .insert({ group_id: groupId, paid_by: paidBy, amount, description: descInput.trim() || "Expense", split_among: toSplitAmong, split_percentages: splitPct })
+        .select("id, paid_by, amount, description, split_among, split_percentages")
         .single();
       if (e1) throw new Error(e1.message);
-      const r = row as { id: string; paid_by: string; amount: number; description: string; split_among: string[] };
-      setEntries((prev) => [...prev, { id: r.id, paid_by: r.paid_by, amount: Number(r.amount), description: r.description ?? "", split_among: Array.isArray(r.split_among) ? r.split_among : [], settled: false }]);
+      const r = row as { id: string; paid_by: string; amount: number; description: string; split_among: string[]; split_percentages?: Record<string, number> | null };
+      setEntries((prev) => [...prev, { id: r.id, paid_by: r.paid_by, amount: Number(r.amount), description: r.description ?? "", split_among: Array.isArray(r.split_among) ? r.split_among : [], settled: false, split_percentages: r.split_percentages ?? null }]);
       setAmountInput("");
       setDescInput("");
       setPaidBy("");
       setSplitAmongIds(memberIds.length ? [...memberIds] : []);
+      setExpenseSplitMode("equal");
+      setExpenseSplitDraft({});
       setAddModalVisible(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to add");
@@ -226,6 +336,18 @@ export default function ExpenseGroupScreen() {
     setAmountInput(String(entry.amount));
     setDescInput(entry.description || "");
     setSplitAmongIds(entry.split_among.length > 0 ? entry.split_among : [...memberIds]);
+    if (entry.split_percentages && Object.keys(entry.split_percentages).length > 0) {
+      setExpenseSplitMode("percentage");
+      const draft: Record<string, string> = {};
+      for (const id of entry.split_among.length ? entry.split_among : memberIds) {
+        draft[id] = String(entry.split_percentages![id] ?? (100 / (entry.split_among.length || memberIds.length)));
+      }
+      setExpenseSplitDraft(draft);
+    } else {
+      setExpenseSplitMode("equal");
+      setExpenseSplitDraft({});
+    }
+    setExpenseModalPanel("main");
     setAddModalVisible(true);
   };
 
@@ -242,24 +364,43 @@ export default function ExpenseGroupScreen() {
       setError("Enter a valid amount.");
       return;
     }
+    if (expenseSplitMode !== "equal") {
+      if (expenseSplitMode === "percentage") {
+        const sum = toSplitAmong.reduce((s, uid) => s + (parseFloat(expenseSplitDraft[uid] ?? "0") || 0), 0);
+        if (Math.abs(sum - 100) > 0.5) {
+          setError("Percentages must total 100%.");
+          return;
+        }
+      }
+      if (expenseSplitMode === "amount") {
+        const sum = toSplitAmong.reduce((s, uid) => s + (parseFloat(expenseSplitDraft[uid] ?? "0") || 0), 0);
+        if (Math.abs(sum - amount) > 0.02) {
+          setError(`Amounts must total ${getCurrency(currencyCode).symbol}${amount.toFixed(2)}.`);
+          return;
+        }
+      }
+    }
+    const splitPct = buildSplitPercentagesFromModal();
     setSaving(true);
     setError(null);
     try {
       const { error: e1 } = await supabase
         .from("expense_entries")
-        .update({ paid_by: paidBy, amount, description: descInput.trim() || "Expense", split_among: toSplitAmong })
+        .update({ paid_by: paidBy, amount, description: descInput.trim() || "Expense", split_among: toSplitAmong, split_percentages: splitPct })
         .eq("id", id);
       if (e1) throw new Error(e1.message);
       setEntries((prev) =>
         prev.map((e) =>
           e.id === id
-            ? { id: e.id, paid_by: paidBy, amount, description: descInput.trim() || "Expense", split_among: toSplitAmong }
+            ? { id: e.id, paid_by: paidBy, amount, description: descInput.trim() || "Expense", split_among: toSplitAmong, split_percentages: splitPct ?? undefined }
             : e
         )
       );
       setEditingEntryId(null);
       setAmountInput("");
       setDescInput("");
+      setExpenseSplitMode("equal");
+      setExpenseSplitDraft({});
       setAddModalVisible(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update");
@@ -433,27 +574,35 @@ export default function ExpenseGroupScreen() {
     );
   };
 
+  const unsettledEntries = useMemo(() => entries.filter((e) => !e.settled), [entries]);
+  const settleUp = useMemo(
+    () => computeSettleUp(memberIds, unsettledEntries.map((e) => ({ paid_by: e.paid_by, amount: e.amount, split_among: e.split_among, split_percentages: e.split_percentages }))),
+    [memberIds, unsettledEntries]
+  );
+
   const balances = useMemo(() => {
     const ids = members.map((m) => m.id);
     const amountPaid: Record<string, number> = Object.fromEntries(ids.map((id) => [id, 0]));
     const share: Record<string, number> = Object.fromEntries(ids.map((id) => [id, 0]));
-    const unsettledEntries = entries.filter((e) => !e.settled);
     for (const e of unsettledEntries) {
       amountPaid[e.paid_by] = (amountPaid[e.paid_by] ?? 0) + e.amount;
-      const n = e.split_among.length || 1;
-      const each = e.amount / n;
-      for (const id of e.split_among) {
-        if (ids.includes(id)) share[id] = (share[id] ?? 0) + each;
+      const among = e.split_among.length ? e.split_among : ids;
+      const pct = e.split_percentages && Object.keys(e.split_percentages).length > 0 ? e.split_percentages : null;
+      if (pct) {
+        let totalPct = 0;
+        for (const id of among) if (ids.includes(id)) totalPct += pct[id] ?? 0;
+        const scale = totalPct > 0 ? 100 / totalPct : 1 / among.length;
+        for (const id of among) {
+          if (ids.includes(id)) share[id] = (share[id] ?? 0) + e.amount * (((pct[id] ?? 0) * scale) / 100);
+        }
+      } else {
+        const n = among.length || 1;
+        const each = e.amount / n;
+        for (const id of among) if (ids.includes(id)) share[id] = (share[id] ?? 0) + each;
       }
     }
     return ids.map((id) => ({ id, paid: amountPaid[id] ?? 0, share: share[id] ?? 0, balance: (amountPaid[id] ?? 0) - (share[id] ?? 0) }));
-  }, [members, entries]);
-
-  const unsettledEntries = useMemo(() => entries.filter((e) => !e.settled), [entries]);
-  const settleUp = useMemo(
-    () => computeSettleUp(memberIds, unsettledEntries.map((e) => ({ paid_by: e.paid_by, amount: e.amount, split_among: e.split_among }))),
-    [memberIds, unsettledEntries]
-  );
+  }, [members, unsettledEntries]);
 
   const username = (id: string) => members.find((m) => m.id === id)?.username ?? "?";
 
@@ -647,7 +796,7 @@ export default function ExpenseGroupScreen() {
 
         {activeTab === "expenses" && (
           <View style={styles.tabPanel}>
-            <Pressable style={styles.addEntryBtnTop} onPress={() => { setEditingEntryId(null); setPaidBy(members[0]?.id ?? ""); setAmountInput(""); setDescInput(""); setSplitAmongIds(memberIds.length ? [...memberIds] : []); setAddModalVisible(true); }}>
+            <Pressable style={styles.addEntryBtnTop} onPress={() => { setEditingEntryId(null); setPaidBy(members[0]?.id ?? ""); setAmountInput(""); setDescInput(""); setSplitAmongIds(memberIds.length ? [...memberIds] : []); setExpenseSplitMode("equal"); setExpenseSplitDraft({}); setExpenseModalPanel("main"); setAddModalVisible(true); }}>
               <Ionicons name="add-circle" size={22} color="#8DEB63" />
               <Text style={styles.addEntryBtnTopText}>Add expense</Text>
             </Pressable>
@@ -885,62 +1034,195 @@ export default function ExpenseGroupScreen() {
       </Modal>
 
       <Modal transparent visible={addModalVisible} animationType="fade">
-        <Pressable style={styles.modalBackdrop} onPress={() => { setAddModalVisible(false); setEditingEntryId(null); }}>
-          <Pressable style={styles.modalCard} onPress={() => {}}>
-            <Text style={styles.modalTitle}>{isEditMode ? "Edit expense" : "Add expense"}</Text>
-            <Text style={styles.modalSectionLabel}>Who paid</Text>
-            <View style={styles.pickerWrap}>
-              {members.map((m) => (
-                <Pressable key={m.id} style={[styles.pickerOption, paidBy === m.id && styles.pickerOptionActive]} onPress={() => setPaidBy(m.id)}>
-                  <Text style={styles.pickerOptionText}>{m.username}</Text>
-                </Pressable>
-              ))}
-            </View>
-            <Text style={styles.modalSectionLabel}>Amount</Text>
-            <TextInput style={styles.modalInputField} value={amountInput} onChangeText={setAmountInput} placeholder={`${getCurrency(currencyCode).symbol} 0.00`} placeholderTextColor="#737373" keyboardType="decimal-pad" />
-            <Text style={styles.modalSectionLabel}>Description</Text>
-            <TextInput style={styles.modalInputField} value={descInput} onChangeText={setDescInput} placeholder={isTravel ? "e.g. Hotel, Food" : "e.g. Materials, Fees"} placeholderTextColor="#737373" />
-            <Text style={styles.modalSectionLabel}>Split among</Text>
-            <Text style={styles.modalHintInline}>Tap to include or exclude. Split equally.</Text>
-            <View style={styles.splitAmongList}>
-              {members.map((m) => {
-                const current = splitAmongIds.length > 0 ? splitAmongIds : memberIds;
-                const isSelected = current.includes(m.id);
-                const toggle = () => {
-                  const cur = splitAmongIds.length > 0 ? splitAmongIds : memberIds;
-                  if (cur.includes(m.id)) {
-                    const next = cur.filter((id) => id !== m.id);
-                    setSplitAmongIds(next.length > 0 ? next : cur);
-                  } else {
-                    setSplitAmongIds(splitAmongIds.length > 0 ? [...splitAmongIds, m.id] : [...memberIds, m.id]);
-                  }
-                };
-                return (
-                  <Pressable key={m.id} style={[styles.splitAmongRow, isSelected && styles.splitAmongRowSelected]} onPress={toggle}>
-                    <Text style={styles.splitAmongName}>{m.username}</Text>
-                    {isSelected ? <Ionicons name="checkmark-circle" size={22} color="#8DEB63" /> : <Ionicons name="ellipse-outline" size={22} color="#525252" />}
+        <Pressable style={styles.modalBackdrop} onPress={() => { setAddModalVisible(false); setEditingEntryId(null); setExpenseModalPanel("main"); }}>
+          <Pressable style={styles.modalCard} onPress={(e) => e.stopPropagation()}>
+            {expenseModalPanel === "main" && (
+              <>
+                <ScrollView style={styles.addExpenseModalScroll} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+                  <Text style={styles.modalTitle}>{isEditMode ? "Edit expense" : "Add expense"}</Text>
+                  <Text style={styles.modalSectionLabel}>Who paid</Text>
+                  <View style={styles.pickerWrap}>
+                    {members.map((m) => (
+                      <Pressable key={m.id} style={[styles.pickerOption, paidBy === m.id && styles.pickerOptionActive]} onPress={() => setPaidBy(m.id)}>
+                        <Text style={styles.pickerOptionText}>{m.username}</Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                  <Text style={styles.modalSectionLabel}>Amount</Text>
+                  <TextInput style={styles.modalInputField} value={amountInput} onChangeText={setAmountInput} placeholder={`${getCurrency(currencyCode).symbol} 0.00`} placeholderTextColor="#737373" keyboardType="decimal-pad" />
+                  <Text style={styles.modalSectionLabel}>Description</Text>
+                  <TextInput style={styles.modalInputField} value={descInput} onChangeText={setDescInput} placeholder={isTravel ? "e.g. Hotel, Food" : "e.g. Materials, Fees"} placeholderTextColor="#737373" />
+                  <Text style={styles.modalSectionLabel}>Split</Text>
+                  <Pressable style={styles.expenseModalRowBtn} onPress={() => setExpenseModalPanel("splitAmong")}>
+                    <View style={styles.expenseModalRowBtnLeft}>
+                      <Text style={styles.expenseModalRowBtnLabel}>Split among</Text>
+                      <View style={styles.expenseModalRowAvatars}>
+                        {toSplitAmongInModal.slice(0, 4).map((uid, idx) => {
+                          const m = members.find((x) => x.id === uid);
+                          return m ? (
+                            <View key={uid} style={[styles.expenseModalAvatarWrap, idx === 0 && { marginLeft: 0 }]}>
+                              {m.avatar_url ? (
+                                <Image source={{ uri: m.avatar_url }} style={styles.expenseModalAvatar} />
+                              ) : (
+                                <View style={styles.expenseModalAvatarPlaceholder}>
+                                  <Text style={styles.expenseModalAvatarInitial}>{initial(m.username)}</Text>
+                                </View>
+                              )}
+                            </View>
+                          ) : null;
+                        })}
+                        {toSplitAmongInModal.length > 4 ? (
+                          <View style={styles.expenseModalAvatarMore}>
+                            <Text style={styles.expenseModalAvatarMoreText}>+{toSplitAmongInModal.length - 4}</Text>
+                          </View>
+                        ) : null}
+                      </View>
+                    </View>
+                    <Text style={styles.expenseModalRowBtnSub}>{toSplitAmongInModal.length} people</Text>
+                    <Ionicons name="chevron-forward" size={18} color="#737373" />
                   </Pressable>
-                );
-              })}
-            </View>
-            <View style={styles.modalBtns}>
-              {isEditMode ? (
-                <Pressable style={styles.modalDeleteBtn} onPress={() => editingEntryId && deleteEntry(editingEntryId)} disabled={saving}>
-                  <Ionicons name="trash-outline" size={18} color="#fca5a5" />
-                  <Text style={styles.modalDeleteBtnText}>Delete</Text>
-                </Pressable>
-              ) : null}
-              <Pressable style={styles.modalCancel} onPress={() => { setAddModalVisible(false); setEditingEntryId(null); }}>
-                <Text style={styles.modalCancelText}>Cancel</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.modalAdd, saving && styles.modalAddDisabled]}
-                onPress={isEditMode ? updateEntry : addEntry}
-                disabled={saving}
-              >
-                {saving ? <ActivityIndicator size="small" color="#0a0a0a" /> : <Text style={styles.modalAddText}>{isEditMode ? "Save" : "Add"}</Text>}
-              </Pressable>
-            </View>
+                  <Pressable style={styles.expenseModalRowBtn} onPress={() => setExpenseModalPanel("howToSplit")} disabled={toSplitAmongInModal.length < 2}>
+                    <Text style={styles.expenseModalRowBtnLabel}>How to split</Text>
+                    <View style={styles.expenseModalRowBtnRight}>
+                      <Text style={styles.expenseModalRowBtnSub}>{toSplitAmongInModal.length < 2 ? "Select 2+ people" : howToSplitButtonLabel}</Text>
+                      <Ionicons name="chevron-forward" size={18} color="#737373" />
+                    </View>
+                  </Pressable>
+                </ScrollView>
+                <View style={styles.modalBtnsCondensed}>
+                  {isEditMode ? (
+                    <Pressable style={styles.modalDeleteBtnSmall} onPress={() => editingEntryId && deleteEntry(editingEntryId)} disabled={saving}>
+                      <Ionicons name="trash-outline" size={16} color="#fca5a5" />
+                    </Pressable>
+                  ) : null}
+                  <Pressable style={styles.modalCancelSmall} onPress={() => { setAddModalVisible(false); setEditingEntryId(null); setExpenseModalPanel("main"); }}>
+                    <Text style={styles.modalCancelText}>Cancel</Text>
+                  </Pressable>
+                  <Pressable style={[styles.modalAddSmall, saving && styles.modalAddDisabled]} onPress={isEditMode ? updateEntry : addEntry} disabled={saving}>
+                    {saving ? <ActivityIndicator size="small" color="#0b100b" /> : <Text style={styles.modalAddText}>{isEditMode ? "Save" : "Add"}</Text>}
+                  </Pressable>
+                </View>
+              </>
+            )}
+
+            {expenseModalPanel === "splitAmong" && (
+              <>
+                <View style={styles.panelHeaderRow}>
+                  <Pressable onPress={() => setExpenseModalPanel("main")} style={styles.panelBackBtn} hitSlop={12}>
+                    <Ionicons name="arrow-back" size={24} color="#8DEB63" />
+                  </Pressable>
+                  <Text style={[styles.modalTitle, styles.panelTitleCenter]}>Split among</Text>
+                  <View style={styles.panelHeaderSpacer} />
+                </View>
+                <Text style={styles.modalHintInline}>Tap to include or exclude. At least one person required.</Text>
+                <ScrollView style={styles.addExpenseModalScroll} contentContainerStyle={styles.panelScrollContent} showsVerticalScrollIndicator={false}>
+                  {members.map((m) => {
+                    const current = splitAmongIds.length > 0 ? splitAmongIds : memberIds;
+                    const isSelected = current.includes(m.id);
+                    const toggle = () => {
+                      const cur = splitAmongIds.length > 0 ? splitAmongIds : memberIds;
+                      if (cur.includes(m.id)) {
+                        const next = cur.filter((id) => id !== m.id);
+                        setSplitAmongIds(next.length > 0 ? next : cur);
+                      } else {
+                        setSplitAmongIds(splitAmongIds.length > 0 ? [...splitAmongIds, m.id] : [...memberIds, m.id]);
+                      }
+                    };
+                    return (
+                      <Pressable key={m.id} style={[styles.splitAmongModalRow, isSelected && styles.splitAmongRowSelected]} onPress={toggle}>
+                        {m.avatar_url ? (
+                          <Image source={{ uri: m.avatar_url }} style={styles.splitAmongModalAvatar} />
+                        ) : (
+                          <View style={styles.splitAmongModalAvatarPlaceholder}>
+                            <Text style={styles.splitAmongModalAvatarInitial}>{initial(m.username)}</Text>
+                          </View>
+                        )}
+                        <Text style={styles.splitAmongName} numberOfLines={1}>{m.username}</Text>
+                        {isSelected ? <Ionicons name="checkmark-circle" size={24} color="#8DEB63" /> : <Ionicons name="ellipse-outline" size={24} color="#525252" />}
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+                <View style={styles.modalBtnsCondensed}>
+                  <Pressable style={styles.modalDoneFull} onPress={() => setExpenseModalPanel("main")}>
+                    <Text style={styles.modalAddText}>Done</Text>
+                  </Pressable>
+                </View>
+              </>
+            )}
+
+            {expenseModalPanel === "howToSplit" && (
+              <>
+                <View style={styles.panelHeaderRow}>
+                  <Pressable onPress={() => setExpenseModalPanel("main")} style={styles.panelBackBtn} hitSlop={12}>
+                    <Ionicons name="arrow-back" size={24} color="#8DEB63" />
+                  </Pressable>
+                  <Text style={[styles.modalTitle, styles.panelTitleCenter]}>How to split</Text>
+                  <View style={styles.panelHeaderSpacer} />
+                </View>
+                <Text style={styles.modalSectionLabel}>Split type</Text>
+                <View style={styles.expenseSplitModeRow}>
+                  <Pressable style={[styles.expenseSplitModeTab, expenseSplitMode === "equal" && styles.expenseSplitModeTabActive]} onPress={() => switchExpenseSplitMode("equal")}>
+                    <Text style={[styles.expenseSplitModeTabText, expenseSplitMode === "equal" && styles.expenseSplitModeTabTextActive]}>Equal</Text>
+                  </Pressable>
+                  <Pressable style={[styles.expenseSplitModeTab, expenseSplitMode === "percentage" && styles.expenseSplitModeTabActive]} onPress={() => switchExpenseSplitMode("percentage")}>
+                    <Text style={[styles.expenseSplitModeTabText, expenseSplitMode === "percentage" && styles.expenseSplitModeTabTextActive]}>%</Text>
+                  </Pressable>
+                  <Pressable style={[styles.expenseSplitModeTab, expenseSplitMode === "amount" && styles.expenseSplitModeTabActive]} onPress={() => switchExpenseSplitMode("amount")}>
+                    <Text style={[styles.expenseSplitModeTabText, expenseSplitMode === "amount" && styles.expenseSplitModeTabTextActive]}>Amount</Text>
+                  </Pressable>
+                  <Pressable style={[styles.expenseSplitModeTab, expenseSplitMode === "shares" && styles.expenseSplitModeTabActive]} onPress={() => switchExpenseSplitMode("shares")}>
+                    <Text style={[styles.expenseSplitModeTabText, expenseSplitMode === "shares" && styles.expenseSplitModeTabTextActive]}>Shares</Text>
+                  </Pressable>
+                </View>
+                {expenseSplitMode !== "equal" ? (
+                  <>
+                    <Text style={styles.modalSectionLabel}>Amount per person</Text>
+                    <Text style={styles.modalHintInline}>
+                      {expenseSplitMode === "percentage" && "Set share % per person. Total must equal 100%."}
+                      {expenseSplitMode === "amount" && `Enter amount each pays. Total: ${getCurrency(currencyCode).symbol}${expenseAmount.toFixed(2)}`}
+                      {expenseSplitMode === "shares" && "Enter whole-number shares (e.g. 1, 2, 3). Split is proportional."}
+                    </Text>
+                    <View style={styles.expenseSplitTotalRow}>
+                      <Text style={styles.expenseSplitTotalLabel}>Total</Text>
+                      <Text style={[styles.expenseSplitTotalValue, (expenseSplitMode === "percentage" ? Math.abs(expenseSplitDraftTotal - 100) < 0.5 : expenseSplitMode === "amount" ? Math.abs(expenseSplitDraftTotal - expenseAmount) < 0.02 : expenseSplitDraftTotal > 0) && styles.expenseSplitTotalOk]}>
+                        {expenseSplitMode === "percentage" && `${expenseSplitDraftTotal.toFixed(1)}%`}
+                        {expenseSplitMode === "amount" && `${getCurrency(currencyCode).symbol}${expenseSplitDraftTotal.toFixed(2)}`}
+                        {expenseSplitMode === "shares" && `${expenseSplitDraftTotal} share${expenseSplitDraftTotal !== 1 ? "s" : ""}`}
+                      </Text>
+                    </View>
+                    <ScrollView style={styles.howToSplitInputsScroll} contentContainerStyle={styles.panelScrollContent} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+                      {toSplitAmongInModal.map((uid) => {
+                        const m = members.find((x) => x.id === uid);
+                        return (
+                          <View key={uid} style={styles.expenseSplitInputRow}>
+                            <Text style={styles.expenseSplitInputLabel} numberOfLines={1}>{m?.username ?? "?"}</Text>
+                            <TextInput
+                              style={styles.expenseSplitInput}
+                              value={expenseSplitDraft[uid] ?? ""}
+                              onChangeText={(t) => setExpenseSplitDraft((prev) => ({ ...prev, [uid]: t }))}
+                              placeholder={expenseSplitMode === "shares" ? "1" : "0"}
+                              placeholderTextColor="#737373"
+                              keyboardType={expenseSplitMode === "shares" ? "number-pad" : "decimal-pad"}
+                            />
+                            {expenseSplitMode === "percentage" ? <Text style={styles.expenseSplitSuffix}>%</Text> : null}
+                            {expenseSplitMode === "amount" ? <Text style={styles.expenseSplitSuffix}>{getCurrency(currencyCode).symbol}</Text> : null}
+                            {expenseSplitMode === "shares" ? <Text style={styles.expenseSplitSuffix}>share(s)</Text> : null}
+                          </View>
+                        );
+                      })}
+                    </ScrollView>
+                  </>
+                ) : (
+                  <Text style={styles.modalHintInline}>Cost is split equally among selected people.</Text>
+                )}
+                <View style={styles.modalBtnsCondensed}>
+                  <Pressable style={styles.modalDoneFull} onPress={() => setExpenseModalPanel("main")}>
+                    <Text style={styles.modalAddText}>Done</Text>
+                  </Pressable>
+                </View>
+              </>
+            )}
           </Pressable>
         </Pressable>
       </Modal>
@@ -1157,7 +1439,8 @@ const styles = StyleSheet.create({
   savedSettlementTitle: { color: "#8DEB63", fontSize: 12, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 },
   savedSettlementDate: { color: "#737373", fontSize: 12, marginBottom: 8 },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.65)", justifyContent: "center", padding: 20 },
-  modalCard: { backgroundColor: "#141a14", borderRadius: 18, padding: 22, borderWidth: 1, borderColor: "rgba(255,255,255,0.08)", maxWidth: 400 },
+  modalCard: { backgroundColor: "#141a14", borderRadius: 18, padding: 22, borderWidth: 1, borderColor: "rgba(255,255,255,0.08)", maxWidth: 400, maxHeight: "85%" },
+  addExpenseModalScroll: { maxHeight: 400 },
   modalTitle: { color: "#fafafa", fontSize: 20, fontWeight: "800", marginBottom: 20 },
   modalSectionLabel: { color: "#737373", fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 },
   modalLabel: { color: "#a3a3a3", fontSize: 12, fontWeight: "600", marginBottom: 6, marginTop: 10 },
@@ -1171,6 +1454,55 @@ const styles = StyleSheet.create({
   splitAmongList: { marginBottom: 8 },
   splitAmongRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 10, paddingHorizontal: 12, borderRadius: 10, backgroundColor: "#0f1410", marginBottom: 6, borderWidth: 1, borderColor: "rgba(255,255,255,0.06)" },
   splitAmongRowSelected: { borderColor: "rgba(141,235,99,0.4)", backgroundColor: "rgba(141,235,99,0.08)" },
+  expenseModalRowBtn: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12, paddingHorizontal: 14, borderRadius: 12, backgroundColor: "#0f1410", marginBottom: 8, borderWidth: 1, borderColor: "rgba(255,255,255,0.08)" },
+  expenseModalRowBtnLeft: { flexDirection: "row", alignItems: "center", flex: 1, minWidth: 0 },
+  expenseModalRowBtnLabel: { color: "#e5e5e5", fontSize: 15, fontWeight: "600", marginRight: 10 },
+  expenseModalRowAvatars: { flexDirection: "row", alignItems: "center" },
+  expenseModalAvatarWrap: { marginLeft: -6, borderWidth: 2, borderColor: "#141a14", borderRadius: 14 },
+  expenseModalAvatar: { width: 28, height: 28, borderRadius: 14 },
+  expenseModalAvatarPlaceholder: { width: 28, height: 28, borderRadius: 14, backgroundColor: "rgba(141,235,99,0.2)", justifyContent: "center", alignItems: "center" },
+  expenseModalAvatarInitial: { color: "#8DEB63", fontSize: 12, fontWeight: "700" },
+  expenseModalAvatarMore: { width: 28, height: 28, borderRadius: 14, backgroundColor: "rgba(115,115,115,0.3)", justifyContent: "center", alignItems: "center", marginLeft: 4 },
+  expenseModalAvatarMoreText: { color: "#a3a3a3", fontSize: 11, fontWeight: "600" },
+  expenseModalRowBtnSub: { color: "#737373", fontSize: 13, marginRight: 6 },
+  expenseModalRowBtnRight: { flexDirection: "row", alignItems: "center" },
+  modalBtnsCondensed: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12, flexWrap: "nowrap" },
+  modalDeleteBtnSmall: { paddingVertical: 10, paddingHorizontal: 14, borderRadius: 10, borderWidth: 1, borderColor: "rgba(252,165,165,0.3)" },
+  modalCancelSmall: { flex: 1, paddingVertical: 10, alignItems: "center", borderRadius: 10, backgroundColor: "#1a1f1a", borderWidth: 1, borderColor: "rgba(255,255,255,0.08)" },
+  modalAddSmall: { flex: 1, paddingVertical: 10, alignItems: "center", borderRadius: 10, backgroundColor: "#8DEB63" },
+  panelHeaderRow: { flexDirection: "row", alignItems: "center", marginBottom: 20 },
+  panelBackBtn: { padding: 4, marginRight: 8 },
+  panelTitleCenter: { flex: 1, textAlign: "center" },
+  panelHeaderSpacer: { width: 40 },
+  panelScrollContent: { paddingBottom: 24 },
+  modalDoneFull: { flex: 1, paddingVertical: 10, alignItems: "center", justifyContent: "center", borderRadius: 10, backgroundColor: "#8DEB63" },
+  howToSplitInputsScroll: { maxHeight: 260 },
+  subModalCard: { backgroundColor: "#141a14", borderRadius: 18, padding: 20, borderWidth: 1, borderColor: "rgba(255,255,255,0.08)", maxWidth: 400, maxHeight: "80%" },
+  subModalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
+  subModalTitle: { color: "#fafafa", fontSize: 18, fontWeight: "700" },
+  subModalHint: { color: "#737373", fontSize: 13, marginBottom: 12 },
+  subModalScroll: { maxHeight: 280, marginBottom: 16 },
+  subModalDoneBtn: { backgroundColor: "#8DEB63", paddingVertical: 12, borderRadius: 12, alignItems: "center" },
+  subModalDoneText: { color: "#0b100b", fontSize: 16, fontWeight: "700" },
+  splitAmongModalRow: { flexDirection: "row", alignItems: "center", paddingVertical: 12, paddingHorizontal: 12, borderRadius: 12, backgroundColor: "#0f1410", marginBottom: 8, borderWidth: 1, borderColor: "rgba(255,255,255,0.06)", gap: 12 },
+  splitAmongModalAvatar: { width: 40, height: 40, borderRadius: 20 },
+  splitAmongModalAvatarPlaceholder: { width: 40, height: 40, borderRadius: 20, backgroundColor: "rgba(141,235,99,0.2)", justifyContent: "center", alignItems: "center" },
+  splitAmongModalAvatarInitial: { color: "#8DEB63", fontSize: 16, fontWeight: "700" },
+  expenseSplitModeRow: { flexDirection: "row", gap: 6, marginBottom: 12 },
+  expenseSplitModeTab: { flex: 1, paddingVertical: 10, borderRadius: 10, backgroundColor: "#0f1410", alignItems: "center", borderWidth: 1, borderColor: "rgba(255,255,255,0.06)" },
+  expenseSplitModeTabActive: { borderColor: "rgba(141,235,99,0.4)", backgroundColor: "rgba(141,235,99,0.08)" },
+  expenseSplitModeTabText: { color: "#737373", fontSize: 13, fontWeight: "600" },
+  expenseSplitModeTabTextActive: { color: "#8DEB63" },
+  expenseSplitInputsWrap: { marginTop: 8, marginBottom: 8 },
+  expenseSplitHint: { color: "#525252", fontSize: 12, marginBottom: 10 },
+  expenseSplitTotalRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 10, paddingVertical: 6 },
+  expenseSplitTotalLabel: { color: "#a3a3a3", fontSize: 13, fontWeight: "600" },
+  expenseSplitTotalValue: { color: "#737373", fontSize: 14 },
+  expenseSplitTotalOk: { color: "#8DEB63" },
+  expenseSplitInputRow: { flexDirection: "row", alignItems: "center", marginBottom: 8, gap: 8 },
+  expenseSplitInputLabel: { color: "#e5e5e5", fontSize: 14, width: 80 },
+  expenseSplitInput: { flex: 1, backgroundColor: "#0f1410", borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, color: "#fafafa", fontSize: 15, borderWidth: 1, borderColor: "rgba(255,255,255,0.1)" },
+  expenseSplitSuffix: { color: "#737373", fontSize: 13, minWidth: 48 },
   splitAmongName: { color: "#e5e5e5", fontSize: 15 },
   modalBtns: { flexDirection: "row", gap: 12, marginTop: 8, flexWrap: "wrap" },
   modalDeleteBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 12, paddingHorizontal: 16, borderRadius: 12, borderWidth: 1, borderColor: "rgba(252,165,165,0.3)" },
