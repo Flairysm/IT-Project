@@ -15,6 +15,8 @@ import { supabase } from "../lib/supabase";
 import { CURRENCIES, formatAmount, getCurrency } from "../lib/currency";
 import { checkRateLimit, RATE_LIMIT } from "../lib/rateLimit";
 import { SubscriptionDiamond } from "../components/SubscriptionDiamond";
+import { QUICK_SPLIT_CATEGORIES, SCAN_RECEIPT_CATEGORIES, type QuickSplitCategory } from "../lib/quickSplitCategories";
+import { computeSettleUp } from "../lib/expenseSettleUp";
 
 type OcrResponse = {
   extracted?: {
@@ -35,8 +37,8 @@ type HistoryRow = {
   amount_due: string;
 };
 
-type OwedToYouItem = { fromUsername: string; amount: number; receiptId: string; merchant: string | null; date: string | null; members: string[] };
-type YouOweItem = { toUsername: string; creatorDisplayName: string; amount: number; receiptId: string; merchant: string | null; date: string | null; members: string[] };
+type OwedToYouItem = { fromUsername: string; amount: number; receiptId: string; merchant: string | null; date: string | null; members: string[]; tripGroupId?: string; category?: string; _fromUserId?: string; _fromUsernameKey?: string; _hostUsernameKey?: string; createdBy?: string };
+type YouOweItem = { toUsername: string; creatorDisplayName: string; amount: number; receiptId: string; merchant: string | null; date: string | null; members: string[]; tripGroupId?: string; category?: string; _toUserId?: string; _toUsernameKey?: string; _hostUsernameKey?: string; createdBy?: string };
 
 function formatSettlementDate(dateStr: string | null): string {
   if (!dateStr) return "";
@@ -55,6 +57,12 @@ function memberInitial(username: string): string {
   return s.charAt(0).toUpperCase();
 }
 
+function getCategoryIcon(category: string | undefined): keyof typeof Ionicons.glyphMap {
+  const cat = category ?? "others";
+  const found = QUICK_SPLIT_CATEGORIES.find((c) => c.id === cat);
+  return found?.icon ?? "ellipsis-horizontal-circle-outline";
+}
+
 export default function HomeScreen() {
   const router = useRouter();
   const { user, profile, updateCurrency } = useAuth();
@@ -62,6 +70,8 @@ export default function HomeScreen() {
   const currencyCode = profile?.default_currency ?? "MYR";
   const currentCurrency = getCurrency(currencyCode);
   const [currencyModalVisible, setCurrencyModalVisible] = useState(false);
+  const [scanCategoryModalVisible, setScanCategoryModalVisible] = useState(false);
+  const [pendingScanCategory, setPendingScanCategory] = useState<QuickSplitCategory | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [historyRows, setHistoryRows] = useState<HistoryRow[]>([]);
@@ -74,11 +84,26 @@ export default function HomeScreen() {
   const [obligationsLoading, setObligationsLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [settlementAvatarMap, setSettlementAvatarMap] = useState<Record<string, string | null>>({});
+  const [tripOwedToMe, setTripOwedToMe] = useState<OwedToYouItem[]>([]);
+  const [tripIOwe, setTripIOwe] = useState<YouOweItem[]>([]);
+  type SettlementCategory = "all" | "restaurant" | "travel" | "groceries" | "business" | "others";
+  const [settlementTab, setSettlementTab] = useState<SettlementCategory>("all");
 
   const totalUnpaidToYou = useMemo(() => {
-    const sum = historyRows.filter((r) => !r.paid).reduce((acc, r) => acc + parseFloat(r.amount_due || "0") || 0, 0);
+    const inc = (key: "restaurant" | "travel" | "groceries" | "business" | "others") => profile?.[`owed_include_${key}` as keyof typeof profile] !== false;
+    let sum = 0;
+    if (inc("restaurant")) sum += owedToYouBreakdown.filter((i) => i.category === "restaurant").reduce((a, i) => a + i.amount, 0) + tripOwedToMe.filter((t) => t.category === "restaurant").reduce((a, t) => a + t.amount, 0);
+    if (inc("travel")) sum += tripOwedToMe.filter((t) => t.category === "travel").reduce((a, t) => a + t.amount, 0);
+    if (inc("groceries")) sum += owedToYouBreakdown.filter((i) => i.category === "groceries").reduce((a, i) => a + i.amount, 0);
+    if (inc("business")) sum += tripOwedToMe.filter((t) => t.category === "business").reduce((a, t) => a + t.amount, 0);
+    if (inc("others")) sum += owedToYouBreakdown.filter((i) => i.category === "others" || !i.category).reduce((a, i) => a + i.amount, 0);
     return sum.toFixed(2);
-  }, [historyRows]);
+  }, [owedToYouBreakdown, tripOwedToMe, profile?.owed_include_restaurant, profile?.owed_include_travel, profile?.owed_include_groceries, profile?.owed_include_business, profile?.owed_include_others]);
+
+  const totalYouOwe = useMemo(
+    () => (youOweList.reduce((s, i) => s + i.amount, 0) + tripIOwe.reduce((s, i) => s + i.amount, 0)).toFixed(2),
+    [youOweList, tripIOwe]
+  );
 
   const loadHistory = useCallback(async () => {
     if (!user?.id) {
@@ -91,7 +116,7 @@ export default function HomeScreen() {
     try {
       const { data: rows, error } = await supabase
         .from("receipts")
-        .select("id, merchant, receipt_date, created_at, total_amount, paid, split_totals, paid_members")
+        .select("id, merchant, receipt_date, created_at, total_amount, paid, split_totals, paid_members, category")
         .eq("host_id", user.id)
         .order("created_at", { ascending: false });
       if (error) throw new Error(error.message);
@@ -133,7 +158,7 @@ export default function HomeScreen() {
           const name = String(s?.name ?? "");
           const amount = Number(s?.amount ?? 0) || 0;
           if (paidMembers.includes(name)) continue;
-          breakdown.push({ fromUsername: name, amount, receiptId: String(r.id), merchant: r.merchant ?? null, date: r.created_at ?? null, members });
+          breakdown.push({ fromUsername: name, amount, receiptId: String(r.id), merchant: r.merchant ?? null, date: r.created_at ?? null, members, category: (r as { category?: string }).category ?? "others", createdBy: undefined });
         }
       }
       setOwedToYouBreakdown(breakdown);
@@ -154,10 +179,10 @@ export default function HomeScreen() {
       const myUsername = profile.username.toLowerCase();
       const { data: receipts } = await supabase
         .from("receipts")
-        .select("id, merchant, created_at, split_totals, paid_members, host_id")
+        .select("id, merchant, created_at, split_totals, paid_members, host_id, category")
         .order("created_at", { ascending: false })
         .limit(300);
-      const withHostId: { amount: number; receiptId: string; merchant: string | null; date: string | null; hostId: string; members: string[] }[] = [];
+      const withHostId: { amount: number; receiptId: string; merchant: string | null; date: string | null; hostId: string; members: string[]; category: string }[] = [];
       const hostIds = new Set<string>();
       for (const r of receipts || []) {
         if (r.host_id === user.id) continue;
@@ -169,9 +194,9 @@ export default function HomeScreen() {
         const amount = Number(myEntry?.amount ?? 0) || 0;
         const members = (splitTotals as { name?: string }[]).map((s) => String(s?.name ?? "").trim()).filter(Boolean);
         hostIds.add(String(r.host_id));
-        withHostId.push({ amount, receiptId: String(r.id), merchant: r.merchant ?? null, date: r.created_at ?? null, hostId: String(r.host_id), members });
+        withHostId.push({ amount, receiptId: String(r.id), merchant: r.merchant ?? null, date: r.created_at ?? null, hostId: String(r.host_id), members, category: (r as { category?: string }).category ?? "others" });
       }
-      let list: YouOweItem[] = withHostId.map((item) => ({ toUsername: "Unknown", creatorDisplayName: "Unknown", amount: item.amount, receiptId: item.receiptId, merchant: item.merchant, date: item.date, members: item.members }));
+      let list: YouOweItem[] = withHostId.map((item) => ({ toUsername: "Unknown", creatorDisplayName: "Unknown", amount: item.amount, receiptId: item.receiptId, merchant: item.merchant, date: item.date, members: item.members, category: item.category }));
       if (hostIds.size > 0) {
         const { data: profiles } = await supabase.from("profiles").select("id, username, display_name").in("id", Array.from(hostIds));
         const byId = Object.fromEntries((profiles || []).map((p) => [String((p as { id: string }).id), p as { username: string; display_name?: string | null }]));
@@ -186,6 +211,7 @@ export default function HomeScreen() {
             merchant: item.merchant,
             date: item.date,
             members: item.members,
+            category: item.category,
           };
         });
       }
@@ -197,14 +223,160 @@ export default function HomeScreen() {
     }
   }, [user?.id, profile?.username]);
 
-  const totalYouOwe = useMemo(() => youOweList.reduce((s, i) => s + i.amount, 0).toFixed(2), [youOweList]);
-  const allSettled = owedToYouBreakdown.length === 0 && youOweList.length === 0;
+  const allSettled = owedToYouBreakdown.length === 0 && youOweList.length === 0 && tripOwedToMe.length === 0 && tripIOwe.length === 0;
+
+  const owedFiltered = useMemo(
+    () => [...owedToYouBreakdown, ...tripOwedToMe].filter((item) => {
+      if (settlementTab === "all") return true;
+      const cat = item.category ?? "others";
+      return cat === settlementTab;
+    }),
+    [owedToYouBreakdown, tripOwedToMe, settlementTab]
+  );
+  const youOweFiltered = useMemo(
+    () => [...youOweList, ...tripIOwe].filter((item) => {
+      if (settlementTab === "all") return true;
+      const cat = item.category ?? "others";
+      return cat === settlementTab;
+    }),
+    [youOweList, tripIOwe, settlementTab]
+  );
+
+  const loadTripObligations = useCallback(async () => {
+    if (!user?.id) {
+      setTripOwedToMe([]);
+      setTripIOwe([]);
+      return;
+    }
+    try {
+      const { data: groups, error: eg } = await supabase.from("expense_groups").select("id, name, category, created_at, host_id").order("created_at", { ascending: false });
+      if (eg || !groups?.length) {
+        setTripOwedToMe([]);
+        setTripIOwe([]);
+        return;
+      }
+      const groupIds = (groups as { id: string }[]).map((g) => g.id);
+      const { data: entries } = await supabase.from("expense_entries").select("group_id, paid_by, amount, split_among, settled").in("group_id", groupIds);
+      const { data: mems } = await supabase.from("expense_group_members").select("group_id, user_id").in("group_id", groupIds);
+
+      const membersByGroup: Record<string, string[]> = {};
+      const entriesByGroup: Record<string, { paid_by: string; amount: number; split_among: string[] }[]> = {};
+      for (const id of groupIds) {
+        membersByGroup[id] = [];
+        entriesByGroup[id] = [];
+      }
+      for (const m of mems ?? []) {
+        const gid = (m as { group_id: string }).group_id;
+        const uid = (m as { user_id: string }).user_id;
+        if (membersByGroup[gid]) membersByGroup[gid].push(uid);
+      }
+      for (const e of entries ?? []) {
+        const gid = (e as { group_id: string }).group_id;
+        const row = e as { paid_by: string; amount: number; split_among: string[]; settled?: boolean };
+        if (row.settled) continue;
+        if (entriesByGroup[gid]) entriesByGroup[gid].push({ paid_by: row.paid_by, amount: Number(row.amount), split_among: Array.isArray(row.split_among) ? row.split_among : [] });
+      }
+
+      const owedToMe: OwedToYouItem[] = [];
+      const iOwe: YouOweItem[] = [];
+      const userIdsToResolve = new Set<string>();
+      const hostIds = new Set<string>();
+      for (const gr of groups as { host_id?: string }[]) {
+        if (gr.host_id) hostIds.add(gr.host_id);
+      }
+      let hostProfiles: Record<string, { username: string; display_name: string | null }> = {};
+      if (hostIds.size > 0) {
+        const { data: hostProfs } = await supabase.from("profiles").select("id, username, display_name").in("id", [...hostIds]);
+        hostProfiles = Object.fromEntries((hostProfs ?? []).map((p: { id: string; username: string; display_name?: string | null }) => [p.id, { username: p.username, display_name: p.display_name ?? null }]));
+      }
+      const getHostCreatedBy = (gr: { host_id?: string }) => {
+        if (!gr.host_id) return "—";
+        const p = hostProfiles[gr.host_id];
+        return p?.display_name?.trim() || p?.username || "—";
+      };
+
+      for (const g of groups as { id: string; name: string; category: string; created_at: string; host_id?: string }[]) {
+        const memberIds = membersByGroup[g.id] ?? [];
+        if (memberIds.length === 0) continue;
+        const groupEntries = entriesByGroup[g.id] ?? [];
+        const settleUp = computeSettleUp(memberIds, groupEntries);
+        const hostCreatedBy = getHostCreatedBy(g);
+        const hostUsername = g.host_id ? hostProfiles[g.host_id]?.username : undefined;
+        for (const line of settleUp) {
+          if (line.to === user.id) {
+            userIdsToResolve.add(line.from);
+            owedToMe.push({
+              fromUsername: "?",
+              amount: line.amount,
+              receiptId: g.id,
+              merchant: g.name,
+              date: g.created_at,
+              members: [],
+              tripGroupId: g.id,
+              category: g.category ?? "travel",
+              _fromUserId: line.from,
+              createdBy: hostCreatedBy,
+              _hostUsernameKey: hostUsername,
+            });
+          } else if (line.from === user.id) {
+            userIdsToResolve.add(line.to);
+            iOwe.push({
+              toUsername: "?",
+              creatorDisplayName: "?",
+              amount: line.amount,
+              receiptId: g.id,
+              merchant: g.name,
+              date: g.created_at,
+              members: [],
+              tripGroupId: g.id,
+              category: g.category ?? "travel",
+              _toUserId: line.to,
+              createdBy: hostCreatedBy,
+              _hostUsernameKey: hostUsername,
+            });
+          }
+        }
+      }
+
+      if (userIdsToResolve.size > 0) {
+        const { data: profs } = await supabase.from("profiles").select("id, username, display_name").in("id", [...userIdsToResolve]);
+        const byId = Object.fromEntries((profs ?? []).map((p: { id: string; username: string; display_name?: string | null }) => [p.id, { username: p.username, display_name: p.display_name ?? null }]));
+        for (const item of owedToMe) {
+          const id = (item as OwedToYouItem & { _fromUserId?: string })._fromUserId;
+          if (id) {
+            const p = byId[id] as { username: string; display_name: string | null } | undefined;
+            item.fromUsername = p?.display_name?.trim() || p?.username || "?";
+            item._fromUsernameKey = p?.username;
+          }
+        }
+        for (const item of iOwe) {
+          const id = (item as YouOweItem & { _toUserId?: string })._toUserId;
+          if (id) {
+            const p = byId[id] as { username: string; display_name: string | null } | undefined;
+            item.toUsername = p?.display_name?.trim() || p?.username || "?";
+            item.creatorDisplayName = item.toUsername;
+            item._toUsernameKey = p?.username;
+          }
+        }
+      }
+
+      setTripOwedToMe(owedToMe);
+      setTripIOwe(iOwe);
+    } catch {
+      setTripOwedToMe([]);
+      setTripIOwe([]);
+    }
+  }, [user?.id]);
 
   useEffect(() => {
     const usernames = [
       ...new Set([
         ...owedToYouBreakdown.flatMap((i) => i.members),
         ...youOweList.flatMap((i) => i.members),
+        ...tripOwedToMe.map((i) => (i as OwedToYouItem & { _fromUsernameKey?: string })._fromUsernameKey).filter(Boolean) as string[],
+        ...tripOwedToMe.map((i) => (i as OwedToYouItem & { _hostUsernameKey?: string })._hostUsernameKey).filter(Boolean) as string[],
+        ...tripIOwe.map((i) => (i as YouOweItem & { _toUsernameKey?: string })._toUsernameKey).filter(Boolean) as string[],
+        ...tripIOwe.map((i) => (i as YouOweItem & { _hostUsernameKey?: string })._hostUsernameKey).filter(Boolean) as string[],
       ].filter(Boolean)),
     ];
     if (usernames.length === 0) {
@@ -227,22 +399,23 @@ export default function HomeScreen() {
       }
     })();
     return () => { cancelled = true; };
-  }, [owedToYouBreakdown, youOweList]);
+  }, [owedToYouBreakdown, youOweList, tripOwedToMe, tripIOwe]);
 
   const onRefreshHome = useCallback(async () => {
     setRefreshing(true);
     try {
-      await Promise.all([loadHistory(), loadYouOwe()]);
+      await Promise.all([loadHistory(), loadYouOwe(), loadTripObligations()]);
     } finally {
       setRefreshing(false);
     }
-  }, [loadHistory, loadYouOwe]);
+  }, [loadHistory, loadYouOwe, loadTripObligations]);
 
   useFocusEffect(
     useCallback(() => {
       void loadHistory();
       void loadYouOwe();
-    }, [loadHistory, loadYouOwe])
+      void loadTripObligations();
+    }, [loadHistory, loadYouOwe, loadTripObligations])
   );
 
   useEffect(() => {
@@ -318,8 +491,10 @@ export default function HomeScreen() {
           source: parsed?.source ?? "ocr",
           imageUri,
           items: JSON.stringify(extracted.items ?? []),
+          category: pendingScanCategory ?? "others",
         },
       });
+      setPendingScanCategory(null);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to scan receipt.";
       setError(msg);
@@ -361,15 +536,21 @@ export default function HomeScreen() {
   };
 
   const onScanPress = () => {
+    setScanCategoryModalVisible(true);
+  };
+
+  const onScanCategorySelected = (category: QuickSplitCategory) => {
+    setPendingScanCategory(category);
+    setScanCategoryModalVisible(false);
     Alert.alert("Scan Receipt", "Choose image source", [
       { text: "Take Photo", onPress: () => void takePhoto() },
       { text: "Choose from Library", onPress: () => void pickFromLibrary() },
-      { text: "Cancel", style: "cancel" },
+      { text: "Cancel", style: "cancel", onPress: () => setPendingScanCategory(null) },
     ]);
   };
 
   const onAddFriendsPress = () => router.push("/(tabs)/friends");
-  const onManualSplitPress = () => router.push({ pathname: "/scan-result", params: { source: "manual" } });
+  const onQuickSplitPress = () => router.push("/quick-split");
 
   if (loading) {
     return (
@@ -421,9 +602,9 @@ export default function HomeScreen() {
               <Ionicons name="person-add-outline" size={20} color="#0a0a0a" />
               <Text style={styles.quickActionBtnText}>Add Friends</Text>
             </Pressable>
-            <Pressable style={({ pressed }) => [styles.quickActionBtn, pressed && styles.actionBtnPressed]} onPress={onManualSplitPress}>
+            <Pressable style={({ pressed }) => [styles.quickActionBtn, pressed && styles.actionBtnPressed]} onPress={onQuickSplitPress}>
               <Ionicons name="create-outline" size={20} color="#0a0a0a" />
-              <Text style={styles.quickActionBtnText}>Manual Split</Text>
+              <Text style={styles.quickActionBtnText}>Quick Split</Text>
             </Pressable>
           </View>
 
@@ -450,24 +631,50 @@ export default function HomeScreen() {
             </View>
           ) : (
             <>
-              {owedToYouBreakdown.length > 0 ? (
+              <View style={styles.settlementTabRow}>
+                <Pressable style={[styles.settlementTab, settlementTab === "all" && styles.settlementTabActive]} onPress={() => setSettlementTab("all")}>
+                  <Ionicons name="apps-outline" size={16} color={settlementTab === "all" ? "#8DEB63" : "#737373"} />
+                  <Text style={[styles.settlementTabText, settlementTab === "all" && styles.settlementTabTextActive]}>All</Text>
+                </Pressable>
+                {QUICK_SPLIT_CATEGORIES.map((cat) => (
+                  <Pressable key={cat.id} style={[styles.settlementTab, settlementTab === cat.id && styles.settlementTabActive]} onPress={() => setSettlementTab(cat.id)}>
+                    <Ionicons name={cat.icon} size={16} color={settlementTab === cat.id ? "#8DEB63" : "#737373"} />
+                    <Text style={[styles.settlementTabText, settlementTab === cat.id && styles.settlementTabTextActive]} numberOfLines={1}>{cat.label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              {owedFiltered.length > 0 ? (
                 <>
                   <Text style={styles.obligationListTitle}>People who owe you</Text>
-                  {owedToYouBreakdown.map((item, idx) => (
+                  {owedFiltered.map((item, idx) => {
+                    const createdByText = item.tripGroupId ? (item.createdBy ?? "—") : (profile?.display_name?.trim() || profile?.username || "You");
+                    const avatarKeys = item.tripGroupId
+                      ? [...new Set([item._fromUsernameKey, item._hostUsernameKey].filter(Boolean) as string[])]
+                      : [...new Set([...item.members, profile?.username].filter(Boolean) as string[])];
+                    return (
                     <Pressable
-                      key={`${item.receiptId}-${item.fromUsername}-${idx}`}
+                      key={item.tripGroupId ? `trip-${item.tripGroupId}-${item.fromUsername}-${idx}` : `${item.receiptId}-${item.fromUsername}-${idx}`}
                       style={({ pressed }) => [styles.obligationRow, styles.obligationRowOwedToYou, pressed && styles.actionBtnPressed]}
-                      onPress={() => router.push({ pathname: "/history/[id]", params: { id: item.receiptId } })}
+                      onPress={() => {
+                        if (item.tripGroupId && item.category) {
+                          router.push({ pathname: "/expense-group", params: { groupId: item.tripGroupId, category: item.category } });
+                        } else {
+                          router.push({ pathname: "/history/[id]", params: { id: item.receiptId } });
+                        }
+                      }}
                     >
+                      <View style={styles.obligationRowIconWrap}>
+                        <Ionicons name={getCategoryIcon(item.category)} size={22} color="#8DEB63" />
+                      </View>
                       <View style={styles.obligationRowLeft}>
                         <Text style={styles.obligationRowMerchant} numberOfLines={1}>{item.merchant || "Receipt"}</Text>
                         {formatSettlementDate(item.date) ? (
                           <Text style={styles.obligationRowDate}>{formatSettlementDate(item.date)}</Text>
                         ) : null}
-                        <Text style={styles.obligationRowName} numberOfLines={1}>created by {profile?.display_name?.trim() || profile?.username || "You"}</Text>
-                        {item.members.length > 0 ? (
+                        <Text style={styles.obligationRowCreatedBy}>Created by {createdByText}</Text>
+                        {avatarKeys.length > 0 ? (
                           <View style={styles.settlementAvatarsRow}>
-                            {item.members.slice(0, 7).map((m, i) => (
+                            {avatarKeys.slice(0, 7).map((m, i) => (
                               <View key={`${item.receiptId}-${m}-${i}`} style={[styles.settlementAvatar, { marginLeft: i === 0 ? 0 : -6 }]}>
                                 {settlementAvatarMap[m.toLowerCase()] ? (
                                   <Image source={{ uri: settlementAvatarMap[m.toLowerCase()]! }} style={styles.settlementAvatarImg} />
@@ -478,9 +685,9 @@ export default function HomeScreen() {
                                 )}
                               </View>
                             ))}
-                            {item.members.length > 7 ? (
+                            {avatarKeys.length > 7 ? (
                               <View style={[styles.settlementAvatar, styles.settlementAvatarMore, { marginLeft: -6 }]}>
-                                <Text style={styles.settlementAvatarMoreText}>+{item.members.length - 7}</Text>
+                                <Text style={styles.settlementAvatarMoreText}>+{avatarKeys.length - 7}</Text>
                               </View>
                             ) : null}
                           </View>
@@ -491,27 +698,41 @@ export default function HomeScreen() {
                         <Ionicons name="chevron-forward" size={18} color="#737373" />
                       </View>
                     </Pressable>
-                  ))}
+                  ); })}
                 </>
               ) : null}
-              {youOweList.length > 0 ? (
+              {youOweFiltered.length > 0 ? (
                 <>
-                  <Text style={[styles.obligationListTitle, { marginTop: owedToYouBreakdown.length > 0 ? 14 : 0 }]}>You owe</Text>
-                  {youOweList.map((item, idx) => (
+                  <Text style={[styles.obligationListTitle, { marginTop: owedFiltered.length > 0 ? 14 : 0 }]}>You owe</Text>
+                  {youOweFiltered.map((item, idx) => {
+                    const createdByText = item.createdBy ?? item.creatorDisplayName;
+                    const avatarKeys = item.tripGroupId
+                      ? [...new Set([item._toUsernameKey, item._hostUsernameKey].filter(Boolean) as string[])]
+                      : [...new Set([...item.members, item.toUsername].filter(Boolean) as string[])];
+                    return (
                     <Pressable
-                      key={`${item.receiptId}-${idx}`}
+                      key={item.tripGroupId ? `trip-${item.tripGroupId}-${idx}` : `receipt-${item.receiptId}-${idx}`}
                       style={({ pressed }) => [styles.obligationRow, styles.obligationRowYouOwe, pressed && styles.actionBtnPressed]}
-                      onPress={() => router.push({ pathname: "/history/[id]", params: { id: item.receiptId } })}
+                      onPress={() => {
+                        if (item.tripGroupId && item.category) {
+                          router.push({ pathname: "/expense-group", params: { groupId: item.tripGroupId, category: item.category } });
+                        } else {
+                          router.push({ pathname: "/history/[id]", params: { id: item.receiptId } });
+                        }
+                      }}
                     >
+                      <View style={styles.obligationRowIconWrap}>
+                        <Ionicons name={getCategoryIcon(item.category)} size={22} color="#fbbf24" />
+                      </View>
                       <View style={styles.obligationRowLeft}>
                         <Text style={styles.obligationRowMerchant} numberOfLines={1}>{item.merchant || "Receipt"}</Text>
                         {formatSettlementDate(item.date) ? (
                           <Text style={styles.obligationRowDate}>{formatSettlementDate(item.date)}</Text>
                         ) : null}
-                        <Text style={styles.obligationRowName} numberOfLines={1}>created by {item.creatorDisplayName}</Text>
-                        {item.members.length > 0 ? (
+                        <Text style={styles.obligationRowCreatedBy}>Created by {createdByText}</Text>
+                        {avatarKeys.length > 0 ? (
                           <View style={styles.settlementAvatarsRow}>
-                            {item.members.slice(0, 7).map((m, i) => (
+                            {avatarKeys.slice(0, 7).map((m, i) => (
                               <View key={`${item.receiptId}-${m}-${i}`} style={[styles.settlementAvatar, { marginLeft: i === 0 ? 0 : -6 }]}>
                                 {settlementAvatarMap[m.toLowerCase()] ? (
                                   <Image source={{ uri: settlementAvatarMap[m.toLowerCase()]! }} style={styles.settlementAvatarImg} />
@@ -522,9 +743,9 @@ export default function HomeScreen() {
                                 )}
                               </View>
                             ))}
-                            {item.members.length > 7 ? (
+                            {avatarKeys.length > 7 ? (
                               <View style={[styles.settlementAvatar, styles.settlementAvatarMore, { marginLeft: -6 }]}>
-                                <Text style={styles.settlementAvatarMoreText}>+{item.members.length - 7}</Text>
+                                <Text style={styles.settlementAvatarMoreText}>+{avatarKeys.length - 7}</Text>
                               </View>
                             ) : null}
                           </View>
@@ -535,8 +756,11 @@ export default function HomeScreen() {
                         <Ionicons name="chevron-forward" size={18} color="#737373" />
                       </View>
                     </Pressable>
-                  ))}
+                  ); })}
                 </>
+              ) : null}
+              {owedFiltered.length === 0 && youOweFiltered.length === 0 && !allSettled ? (
+                <Text style={styles.obligationMeta}>No obligations in this category</Text>
               ) : null}
             </>
           )}
@@ -579,6 +803,31 @@ export default function HomeScreen() {
                   <Text style={styles.currencyRowSymbol}>{c.symbol}</Text>
                 </View>
                 {c.code === currencyCode ? <Text style={styles.currencyRowCheck}>✓</Text> : null}
+              </Pressable>
+            ))}
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal transparent visible={scanCategoryModalVisible} animationType="fade" onRequestClose={() => setScanCategoryModalVisible(false)}>
+        <Pressable style={styles.currencyModalBackdrop} onPress={() => setScanCategoryModalVisible(false)}>
+          <Pressable style={styles.currencyModalCard} onPress={() => {}}>
+            <Text style={styles.currencyModalTitle}>SCAN RECEIPT</Text>
+            <Text style={styles.currencyModalSubtitle}>Restaurant or groceries only. For trips or business, use Quick Split.</Text>
+            {SCAN_RECEIPT_CATEGORIES.map((cat) => (
+              <Pressable
+                key={cat.id}
+                onPress={() => onScanCategorySelected(cat.id)}
+                style={({ pressed }) => [styles.scanCategoryRow, pressed && styles.actionBtnPressed]}
+              >
+                <View style={styles.scanCategoryIconWrap}>
+                  <Ionicons name={cat.icon} size={22} color="#8DEB63" />
+                </View>
+                <View style={styles.scanCategoryText}>
+                  <Text style={styles.scanCategoryLabel}>{cat.label}</Text>
+                  <Text style={styles.scanCategorySub}>{cat.subtitle}</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color="#737373" />
               </Pressable>
             ))}
           </Pressable>
@@ -704,6 +953,27 @@ const styles = StyleSheet.create({
   currencyRowLabel: { color: "#e5e5e5", fontSize: 15, fontWeight: "600" },
   currencyRowSymbol: { color: "#a3a3a3", fontSize: 12, marginTop: 2 },
   currencyRowCheck: { color: "#8DEB63", fontSize: 16, fontWeight: "700" },
+  scanCategoryRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.04)",
+    marginBottom: 8,
+  },
+  scanCategoryIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+    backgroundColor: "rgba(141,235,99,0.12)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
+  },
+  scanCategoryText: { flex: 1 },
+  scanCategoryLabel: { color: "#e5e5e5", fontSize: 15, fontWeight: "600" },
+  scanCategorySub: { color: "#a3a3a3", fontSize: 12, marginTop: 2 },
 
   obligationsCardsRow: { flexDirection: "row", gap: 10, marginTop: 12, marginBottom: 4 },
   obligationCard: { flex: 1, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 12, borderWidth: 1 },
@@ -726,10 +996,20 @@ const styles = StyleSheet.create({
   },
   obligationRowOwedToYou: { backgroundColor: "rgba(141,235,99,0.08)", borderWidth: 1, borderColor: "rgba(141,235,99,0.25)" },
   obligationRowYouOwe: { backgroundColor: "rgba(251,191,36,0.06)", borderWidth: 1, borderColor: "rgba(251,191,36,0.15)" },
+  obligationRowIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
+  },
   obligationRowLeft: { flex: 1, minWidth: 0, marginRight: 12 },
   obligationRowMerchant: { color: "#fff", fontSize: 17, fontWeight: "700", marginBottom: 2 },
-  obligationRowDate: { color: "#737373", fontSize: 13, marginBottom: 4 },
-  obligationRowName: { color: "#a3a3a3", fontSize: 15, fontWeight: "500", marginBottom: 6 },
+  obligationRowDate: { color: "#737373", fontSize: 13, marginBottom: 2 },
+  obligationRowCreatedBy: { color: "#737373", fontSize: 12, marginBottom: 2 },
+  obligationRowName: { color: "#a3a3a3", fontSize: 15, fontWeight: "500", marginBottom: 4 },
   settlementAvatarsRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap" },
   settlementAvatar: {
     width: 22,
@@ -796,6 +1076,11 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.08)",
   },
   sectionTitle: { color: "#e5e5e5", fontSize: 20, fontWeight: "700", marginBottom: 10 },
+  settlementTabRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 14 },
+  settlementTab: { flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.06)", borderWidth: 1, borderColor: "rgba(255,255,255,0.08)" },
+  settlementTabActive: { backgroundColor: "rgba(141,235,99,0.15)", borderColor: "rgba(141,235,99,0.35)" },
+  settlementTabText: { color: "#a3a3a3", fontSize: 12, fontWeight: "600", maxWidth: 72 },
+  settlementTabTextActive: { color: "#8DEB63", fontWeight: "700" },
   error: { color: "#fca5a5", marginBottom: 12 },
   errorCardTitle: { color: "#e5e5e5", fontSize: 16, fontWeight: "700", flex: 1 },
   errorHeaderRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 8 },

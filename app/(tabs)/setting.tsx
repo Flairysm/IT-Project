@@ -23,6 +23,7 @@ import { EZSPLIT_URL } from "../config";
 import { CURRENCIES, getCurrency } from "../lib/currency";
 import { SubscriptionDiamond } from "../components/SubscriptionDiamond";
 import { savePushTokenToProfile } from "../lib/notifications";
+import { QUICK_SPLIT_CATEGORIES } from "../lib/quickSplitCategories";
 
 function initials(displayName: string, username: string): string {
   if (displayName && displayName.trim()) {
@@ -35,7 +36,7 @@ function initials(displayName: string, username: string): string {
 }
 
 export default function SettingScreen() {
-  const { profile, user, logout, refreshProfile, updateUsername, updateDisplayName, updateCurrency, updateAvatarUrl } = useAuth();
+  const { profile, user, logout, refreshProfile, updateUsername, updateDisplayName, updateCurrency, updateAvatarUrl, updateSettlementOwedPrefs } = useAuth();
   const [accountModalVisible, setAccountModalVisible] = useState(false);
   const [currencyModalVisible, setCurrencyModalVisible] = useState(false);
   const [displayNameDraft, setDisplayNameDraft] = useState(profile?.display_name ?? "");
@@ -47,6 +48,7 @@ export default function SettingScreen() {
   const [notificationLoading, setNotificationLoading] = useState(false);
   const [notificationStatus, setNotificationStatus] = useState<"on" | "off" | "unknown">("unknown");
   const [deletingAccount, setDeletingAccount] = useState(false);
+  const [settlementPrefModalVisible, setSettlementPrefModalVisible] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
@@ -191,6 +193,16 @@ export default function SettingScreen() {
               <View style={styles.cardRowText}>
                 <Text style={styles.cardRowTitle}>Account</Text>
                 <Text style={styles.cardRowSub}>Username & display name</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#737373" />
+            </Pressable>
+            <Pressable style={({ pressed }) => [styles.cardRow, pressed && styles.pressed]} onPress={() => setSettlementPrefModalVisible(true)}>
+              <View style={styles.cardRowIcon}>
+                <Ionicons name="options-outline" size={20} color="#8DEB63" />
+              </View>
+              <View style={styles.cardRowText}>
+                <Text style={styles.cardRowTitle}>Settlement Preference</Text>
+                <Text style={styles.cardRowSub}>You're owed — which categories count in the total</Text>
               </View>
               <Ionicons name="chevron-forward" size={18} color="#737373" />
             </Pressable>
@@ -418,6 +430,42 @@ export default function SettingScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      <Modal transparent visible={settlementPrefModalVisible} animationType="fade" onRequestClose={() => setSettlementPrefModalVisible(false)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setSettlementPrefModalVisible(false)}>
+          <Pressable style={styles.modalCard} onPress={() => {}}>
+            <View style={styles.modalAccent} />
+            <Text style={styles.modalTitle}>Settlement Preference</Text>
+            <Text style={styles.modalSub}>You're owed — choose which categories count in the total on Home</Text>
+            <View style={styles.settlementPrefList}>
+              {QUICK_SPLIT_CATEGORIES.map((cat, idx) => {
+                const prefKey = `owed_include_${cat.id}` as keyof typeof profile;
+                const isOn = profile?.[prefKey] !== false;
+                const isLast = idx === QUICK_SPLIT_CATEGORIES.length - 1;
+                return (
+                  <Pressable
+                    key={cat.id}
+                    style={({ pressed }) => [styles.settlementPrefRow, isLast && styles.settlementPrefRowLast, pressed && styles.pressed]}
+                    onPress={() => void updateSettlementOwedPrefs({ [cat.id]: !isOn })}
+                  >
+                    <View style={styles.cardRowIcon}>
+                      <Ionicons name={cat.icon} size={20} color="#8DEB63" />
+                    </View>
+                    <View style={styles.cardRowText}>
+                      <Text style={styles.cardRowTitle}>{cat.label}</Text>
+                      <Text style={styles.cardRowSub}>{cat.subtitle}</Text>
+                    </View>
+                    {isOn ? <Ionicons name="checkmark-circle" size={22} color="#8DEB63" /> : <Ionicons name="ellipse-outline" size={22} color="#525252" />}
+                  </Pressable>
+                );
+              })}
+            </View>
+            <Pressable style={({ pressed }) => [styles.settlementPrefDoneBtn, pressed && styles.pressed]} onPress={() => setSettlementPrefModalVisible(false)}>
+              <Text style={styles.settlementPrefDoneText}>Done</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -478,6 +526,27 @@ const styles = StyleSheet.create({
     borderBottomColor: "rgba(255,255,255,0.06)",
   },
   cardRowLast: { borderBottomWidth: 0 },
+  owedPrefRow: { paddingLeft: 54 },
+  settlementPrefList: { marginBottom: 20 },
+  settlementPrefRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 14,
+    gap: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.06)",
+  },
+  settlementPrefRowLast: { borderBottomWidth: 0 },
+  settlementPrefDoneBtn: {
+    alignSelf: "stretch",
+    marginTop: 8,
+    minHeight: 48,
+    borderRadius: 14,
+    backgroundColor: "#8DEB63",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  settlementPrefDoneText: { color: "#0a0a0a", fontSize: 16, fontWeight: "700" },
   cardRowIcon: {
     width: 40,
     height: 40,

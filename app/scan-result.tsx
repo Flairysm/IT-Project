@@ -8,7 +8,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { Image as ExpoImage } from "expo-image";
 import { useAuth } from "./auth-context";
 import { supabase } from "./lib/supabase";
-import { formatAmount } from "./lib/currency";
+import { formatAmount, getCurrency } from "./lib/currency";
 
 const RECEIPT_IMAGES_BUCKET = "receipt-images";
 
@@ -58,12 +58,26 @@ export default function ScanResultScreen() {
   const router = useRouter();
   const { user, profile } = useAuth();
   const currencyCode = profile?.default_currency ?? "MYR";
-  const params = useLocalSearchParams<{ merchant?: string; date?: string; total?: string; source?: string; imageUri?: string; items?: string; receiptId?: string }>();
+  const params = useLocalSearchParams<{ merchant?: string; date?: string; total?: string; source?: string; imageUri?: string; items?: string; receiptId?: string; category?: string }>();
   const source = params.source || "ocr";
+  const category = (params.category as "restaurant" | "travel" | "groceries" | "business" | "others") || "others";
   const imageUri = params.imageUri;
   const receiptId = params.receiptId?.trim() || null;
   const isEditMode = Boolean(receiptId);
   const isManualMode = source === "manual" && !receiptId;
+
+  const quickSplitLabels = {
+    restaurant: { titlePlaceholder: "Restaurant name", subtitle: "One person pays the bill; split precisely among friends." },
+    travel: { titlePlaceholder: "Trip or expense name", subtitle: "Enter trip details and split the cost" },
+    groceries: { titlePlaceholder: "Store name", subtitle: "Enter store and total, then split" },
+    business: { titlePlaceholder: "Expense / project name", subtitle: "Enter expense details and split" },
+    others: { titlePlaceholder: "Title", subtitle: "Enter details and split" },
+  };
+  const manualLabels = quickSplitLabels[category] || quickSplitLabels.others;
+  const categoryLabel = { restaurant: "Restaurant", travel: "Travel", groceries: "Groceries", business: "Business", others: "Others" }[category] || "";
+
+  const isRestaurantOrGroceriesManual = isManualMode && !receiptId && (category === "restaurant" || category === "groceries");
+  const todayDateString = useMemo(() => new Date().toISOString().slice(0, 10), []);
 
   const [merchant, setMerchant] = useState(params.merchant || "");
   const [date, setDate] = useState(params.date || "");
@@ -71,6 +85,12 @@ export default function ScanResultScreen() {
   const [items, setItems] = useState<ResultItem[]>(() => {
     try { return params.items ? (JSON.parse(params.items) as ResultItem[]) : []; } catch { return []; }
   });
+
+  const calculatedTotalFromItems = useMemo(
+    () =>
+      items.reduce((sum, item) => sum + (parseFloat(item.price || "0") || 0), 0).toFixed(2),
+    [items]
+  );
 
   const [members, setMembers] = useState<ScanMember[]>([]);
   const [assignments, setAssignments] = useState<Assignments>({});
@@ -83,6 +103,8 @@ export default function ScanResultScreen() {
   const [dynamicItemIndex, setDynamicItemIndex] = useState<number | null>(null);
   const [dynamicAssignees, setDynamicAssignees] = useState<number[]>([]);
   const [dynamicDraft, setDynamicDraft] = useState<Record<number, string>>({});
+  type DynamicSplitMode = "percentage" | "amount" | "shares";
+  const [dynamicSplitMode, setDynamicSplitMode] = useState<DynamicSplitMode>("percentage");
   const [groupPickerVisible, setGroupPickerVisible] = useState(false);
   const [groups, setGroups] = useState<MemberGroup[]>([]);
   const [groupsLoading, setGroupsLoading] = useState(false);
@@ -121,11 +143,12 @@ export default function ScanResultScreen() {
       if (itemsErr) throw new Error(itemsErr.message);
       const rowsList = rows || [];
       const itemIds = rowsList.map((r: { id?: string }) => r.id as string);
-      const loadedItems: ResultItem[] = rowsList.map((r: { name?: string; qty?: number; unit_price?: string }) => ({
-        name: r.name ?? "",
-        qty: Number(r.qty) || 1,
-        price: String(r.unit_price ?? "0"),
-      }));
+      const loadedItems: ResultItem[] = rowsList.map((r: { name?: string; qty?: number; unit_price?: string }) => {
+        const qty = Number(r.qty) || 1;
+        const unitPrice = parseFloat(r.unit_price ?? "0") || 0;
+        const lineTotal = (unitPrice * qty).toFixed(2);
+        return { name: r.name ?? "", qty, price: lineTotal };
+      });
       setItems(loadedItems.length ? loadedItems : [{ name: "", qty: 1, price: "0" }]);
 
       const splitTotalsRaw = Array.isArray(rec.split_totals) ? rec.split_totals : [];
@@ -168,7 +191,7 @@ export default function ScanResultScreen() {
           const memberIndex = usernameToMemberIndex[username.toLowerCase()];
           if (memberIndex == null) return;
           if (!assignAll[itemIndex].includes(memberIndex)) assignAll[itemIndex].push(memberIndex);
-          const itemTotal = parseFloat(loadedItems[itemIndex]?.price ?? "0") * (loadedItems[itemIndex]?.qty ?? 1) || 0.01;
+          const itemTotal = parseFloat(loadedItems[itemIndex]?.price ?? "0") || 0.01;
           const pct = Number(((Number(a.share_amount) / itemTotal) * 100).toFixed(2));
           if (!initialDynamic[itemIndex]) initialDynamic[itemIndex] = {};
           initialDynamic[itemIndex][memberIndex] = pct;
@@ -210,6 +233,12 @@ export default function ScanResultScreen() {
     }
   }, [isManualMode]);
 
+  useEffect(() => {
+    if (isRestaurantOrGroceriesManual && members.length === 0 && profile?.username) {
+      setMembers([{ username: profile.username, avatar_url: profile.avatar_url ?? null }]);
+    }
+  }, [isRestaurantOrGroceriesManual, members.length, profile?.username, profile?.avatar_url]);
+
   const filteredFriends = useMemo(() => {
     const q = friendSearchQuery.trim().toLowerCase();
     if (!q) return friendsList;
@@ -240,28 +269,32 @@ export default function ScanResultScreen() {
       }
     });
 
-    // Reconcile to receipt total so tax, discounts, service fees, etc. are included.
-    const itemsSubtotal = items.reduce((sum, item) => sum + (parseFloat(item.price || "0") || 0), 0);
-    const receiptTotal = parseFloat(total || "0") || 0;
-    const adjustment = receiptTotal - itemsSubtotal;
-    const assignedBaseSum = baseTotals.reduce((sum, value) => sum + value, 0);
     const totals = [...baseTotals];
 
-    if (Math.abs(adjustment) > 0.0001 && members.length) {
-      if (assignedBaseSum > 0.0001) {
-        totals.forEach((amount, idx) => {
-          totals[idx] = amount + adjustment * (amount / assignedBaseSum);
-        });
-      } else {
-        const evenShare = adjustment / members.length;
-        totals.forEach((_, idx) => {
-          totals[idx] = evenShare;
-        });
+    // For scanned receipts, reconcile to receipt total so tax, discounts, fees are included. For manual, no adjustment — user adds tax as a line item.
+    if (!isManualMode) {
+      const itemsSubtotal = items.reduce((sum, item) => sum + (parseFloat(item.price || "0") || 0), 0);
+      const effectiveTotal = isRestaurantOrGroceriesManual ? calculatedTotalFromItems : total;
+      const receiptTotal = parseFloat(effectiveTotal || "0") || 0;
+      const adjustment = receiptTotal - itemsSubtotal;
+      const assignedBaseSum = baseTotals.reduce((sum, value) => sum + value, 0);
+
+      if (Math.abs(adjustment) > 0.0001 && members.length) {
+        if (assignedBaseSum > 0.0001) {
+          totals.forEach((amount, idx) => {
+            totals[idx] = amount + adjustment * (amount / assignedBaseSum);
+          });
+        } else {
+          const evenShare = adjustment / members.length;
+          totals.forEach((_, idx) => {
+            totals[idx] = evenShare;
+          });
+        }
       }
     }
 
     return members.map((m, i) => ({ name: m.username, amount: Math.round(totals[i] * 100) / 100 }));
-  }, [assignments, dynamicPercentages, items, members, total]);
+  }, [assignments, dynamicPercentages, items, members, total, isRestaurantOrGroceriesManual, calculatedTotalFromItems, isManualMode]);
 
   const loadFriendsForMember = async () => {
     if (!user?.id) return;
@@ -304,8 +337,10 @@ export default function ScanResultScreen() {
     setItems((prev) => {
       const next = [...prev];
       if (!next[index]) return next;
-      if (field === "qty") next[index] = { ...next[index], qty: typeof value === "number" ? value : parseInt(String(value), 10) || 1 };
-      else if (field === "price") next[index] = { ...next[index], price: String(value) };
+      if (field === "qty") {
+        const num = typeof value === "number" ? value : (String(value).trim() === "" ? 0 : parseInt(String(value).replace(/\D/g, ""), 10));
+        next[index] = { ...next[index], qty: Number.isNaN(num) ? 0 : num };
+      } else if (field === "price") next[index] = { ...next[index], price: String(value) };
       else next[index] = { ...next[index], name: String(value) };
       return next;
     });
@@ -473,29 +508,43 @@ export default function ScanResultScreen() {
       return;
     }
 
+    const itemTotal = parseFloat(items[itemIndex]?.price ?? "0") || 0;
     const existing = dynamicPercentages[itemIndex] || {};
     const sorted = [...assignees].sort((a, b) => a - b);
-    const draft: Record<number, number> = {};
-    const equal = sorted.length ? 100 / sorted.length : 0;
+    const n = sorted.length;
+    const draftText: Record<number, string> = {};
 
-    sorted.forEach((memberIdx) => {
-      const value = existing[memberIdx];
-      draft[memberIdx] = Number.isFinite(value) ? value : Number(equal.toFixed(2));
-    });
+    if (dynamicSplitMode === "percentage") {
+      const equal = n ? 100 / n : 0;
+      sorted.forEach((memberIdx) => {
+        const value = existing[memberIdx];
+        draftText[memberIdx] = Number.isFinite(value) ? value.toFixed(2) : equal.toFixed(2);
+      });
+    } else if (dynamicSplitMode === "amount") {
+      const equalAmt = n ? itemTotal / n : 0;
+      sorted.forEach((memberIdx) => {
+        const pct = existing[memberIdx];
+        const amt = Number.isFinite(pct) ? (itemTotal * pct) / 100 : equalAmt;
+        draftText[memberIdx] = amt.toFixed(2);
+      });
+    } else {
+      sorted.forEach((memberIdx) => {
+        draftText[memberIdx] = "1";
+      });
+    }
 
     setDynamicItemIndex(itemIndex);
     setDynamicAssignees(sorted);
-    const draftText: Record<number, string> = {};
-    Object.entries(draft).forEach(([memberIdx, value]) => {
-      draftText[Number(memberIdx)] = value.toFixed(2);
-    });
     setDynamicDraft(draftText);
     setDynamicModalVisible(true);
   };
 
   const updateDynamicDraft = (memberIndex: number, input: string) => {
-    // Keep typing smooth (including backspace) and only validate on Apply.
-    if (!/^\d*\.?\d*$/.test(input)) return;
+    if (dynamicSplitMode === "shares") {
+      if (!/^\d*$/.test(input)) return;
+    } else {
+      if (!/^\d*\.?\d*$/.test(input)) return;
+    }
     setDynamicDraft((prev) => ({ ...prev, [memberIndex]: input }));
   };
 
@@ -508,15 +557,84 @@ export default function ScanResultScreen() {
     return Number(total.toFixed(2));
   }, [dynamicAssignees, dynamicDraft]);
 
+  const dynamicItemTotal = useMemo(() => {
+    if (dynamicItemIndex == null) return 0;
+    return parseFloat(items[dynamicItemIndex]?.price ?? "0") || 0;
+  }, [dynamicItemIndex, items]);
+
+  const switchDynamicMode = (mode: DynamicSplitMode) => {
+    setDynamicSplitMode(mode);
+    const n = dynamicAssignees.length;
+    const itemTotal = dynamicItemTotal;
+    const existing = dynamicItemIndex != null ? dynamicPercentages[dynamicItemIndex] || {} : {};
+    const draftText: Record<number, string> = {};
+    if (mode === "percentage") {
+      const equal = n ? 100 / n : 0;
+      dynamicAssignees.forEach((memberIdx) => {
+        const value = existing[memberIdx];
+        draftText[memberIdx] = Number.isFinite(value) ? value.toFixed(2) : equal.toFixed(2);
+      });
+    } else if (mode === "amount") {
+      const equalAmt = n ? itemTotal / n : 0;
+      dynamicAssignees.forEach((memberIdx) => {
+        const pct = existing[memberIdx];
+        const amt = Number.isFinite(pct) ? (itemTotal * pct) / 100 : equalAmt;
+        draftText[memberIdx] = amt.toFixed(2);
+      });
+    } else {
+      dynamicAssignees.forEach((memberIdx) => {
+        draftText[memberIdx] = "1";
+      });
+    }
+    setDynamicDraft(draftText);
+  };
+
   const applyDynamicSplit = () => {
     if (dynamicItemIndex == null || !dynamicAssignees.length) {
       setDynamicModalVisible(false);
       return;
     }
     const out: Record<number, number> = {};
+    const itemTotal = dynamicItemTotal;
 
     if (dynamicAssignees.length === 1) {
       out[dynamicAssignees[0]] = 100;
+      setDynamicPercentages((prev) => ({ ...prev, [dynamicItemIndex]: out }));
+      setDynamicModalVisible(false);
+      return;
+    }
+
+    if (dynamicSplitMode === "amount") {
+      const amounts = dynamicAssignees.map((memberIndex) => parseFloat(dynamicDraft[memberIndex] ?? "0") || 0);
+      const sum = amounts.reduce((a, b) => a + b, 0);
+      if (sum <= 0) {
+        setDynamicModalVisible(false);
+        return;
+      }
+      dynamicAssignees.forEach((memberIndex, idx) => {
+        out[memberIndex] = Number(((amounts[idx] / sum) * 100).toFixed(2));
+      });
+      const lastIdx = dynamicAssignees[dynamicAssignees.length - 1];
+      const totalPct = Object.values(out).reduce((a, b) => a + b, 0);
+      out[lastIdx] = Number((100 - (totalPct - (out[lastIdx] ?? 0))).toFixed(2));
+      setDynamicPercentages((prev) => ({ ...prev, [dynamicItemIndex]: out }));
+      setDynamicModalVisible(false);
+      return;
+    }
+
+    if (dynamicSplitMode === "shares") {
+      const shares = dynamicAssignees.map((memberIndex) => Math.max(0, parseInt(dynamicDraft[memberIndex] ?? "0", 10) || 0));
+      const totalShares = shares.reduce((a, b) => a + b, 0);
+      if (totalShares <= 0) {
+        setDynamicModalVisible(false);
+        return;
+      }
+      dynamicAssignees.forEach((memberIndex, idx) => {
+        out[memberIndex] = Number(((shares[idx] / totalShares) * 100).toFixed(2));
+      });
+      const totalPct = Object.values(out).reduce((a, b) => a + b, 0);
+      const lastIdx = dynamicAssignees[dynamicAssignees.length - 1];
+      out[lastIdx] = Number((100 - (totalPct - (out[lastIdx] ?? 0))).toFixed(2));
       setDynamicPercentages((prev) => ({ ...prev, [dynamicItemIndex]: out }));
       setDynamicModalVisible(false);
       return;
@@ -535,7 +653,6 @@ export default function ScanResultScreen() {
     let nonLastValues = nonLastMembers.map((memberIndex) => toSafePercent(dynamicDraft[memberIndex]));
     let nonLastSum = nonLastValues.reduce((sum, value) => sum + value, 0);
 
-    // If non-last entries overflow 100, scale them down on Apply.
     if (nonLastSum > 100) {
       const factor = 100 / nonLastSum;
       nonLastValues = nonLastValues.map((value) => Number((value * factor).toFixed(2)));
@@ -546,7 +663,6 @@ export default function ScanResultScreen() {
       out[memberIndex] = nonLastValues[idx];
     });
 
-    // Last user keeps total in check to reach exactly 100%.
     const remainder = Number((100 - nonLastSum).toFixed(2));
     out[lastMemberIndex] = remainder < 0 ? 0 : remainder;
 
@@ -563,7 +679,8 @@ export default function ScanResultScreen() {
     setSaveError(null);
     setSavedId(null);
     try {
-      const totalAmount = (total || "0").trim() || "0";
+      const totalAmount = isRestaurantOrGroceriesManual ? calculatedTotalFromItems : ((total || "0").trim() || "0");
+      const receiptDateValue = isRestaurantOrGroceriesManual ? todayDateString : (date || "").trim() || null;
       const newSplitTotals = splitTotals.map((s) => ({ name: s.name, amount: s.amount }));
 
       const getMemberUserIds = async (): Promise<string[]> => {
@@ -583,9 +700,7 @@ export default function ScanResultScreen() {
           const itemId = itemIdsInOrder[i];
           if (!itemId) continue;
           const it = items[i];
-          const unitPrice = parseFloat(it?.price ?? "0") || 0;
-          const qty = Number(it?.qty) || 1;
-          const itemTotal = unitPrice * qty;
+          const itemTotal = parseFloat(it?.price ?? "0") || 0;
           const dyn = dynamicPercentages[i];
           for (const memberIndex of assignees) {
             const userId = memberIds[memberIndex];
@@ -613,12 +728,13 @@ export default function ScanResultScreen() {
           .from("receipts")
           .update({
             merchant: (merchant || "").trim() || null,
-            receipt_date: (date || "").trim() || null,
+            receipt_date: receiptDateValue,
             total_amount: totalAmount,
             currency: currencyCode || "MYR",
             split_totals: newSplitTotals,
             paid_members: paidMembers,
             paid,
+            category: category || "others",
           })
           .eq("id", receiptId)
           .eq("host_id", user.id);
@@ -631,14 +747,14 @@ export default function ScanResultScreen() {
 
         for (const item of items) {
           const qty = Number(item.qty) || 1;
-          const price = String(item.price ?? "0");
-          const totalPrice = (parseFloat(price) * qty).toFixed(2);
+          const lineTotal = parseFloat(item.price ?? "0") || 0;
+          const unitPrice = qty > 0 ? (lineTotal / qty).toFixed(2) : "0";
           await supabase.from("receipt_items").insert({
             receipt_id: receiptId,
             name: item.name ?? "",
             qty,
-            unit_price: price,
-            total_price: totalPrice,
+            unit_price: unitPrice,
+            total_price: lineTotal.toFixed(2),
           });
         }
         const { data: itemRows } = await supabase.from("receipt_items").select("id").eq("receipt_id", receiptId).order("created_at", { ascending: true });
@@ -653,13 +769,14 @@ export default function ScanResultScreen() {
           .insert({
             host_id: user.id,
             merchant: (merchant || "").trim() || null,
-            receipt_date: (date || "").trim() || null,
+            receipt_date: receiptDateValue,
             total_amount: totalAmount,
             currency: currencyCode || "MYR",
             source: source as "vision" | "ocr" | "manual",
             split_totals: newSplitTotals,
             paid_members: initialPaidMembers,
             paid: false,
+            category: category || "others",
           })
           .select("id")
           .single();
@@ -668,14 +785,14 @@ export default function ScanResultScreen() {
         if (!newId) throw new Error("No receipt id returned");
         for (const item of items) {
           const qty = Number(item.qty) || 1;
-          const price = String(item.price ?? "0");
-          const totalPrice = (parseFloat(price) * qty).toFixed(2);
+          const lineTotal = parseFloat(item.price ?? "0") || 0;
+          const unitPrice = qty > 0 ? (lineTotal / qty).toFixed(2) : "0";
           await supabase.from("receipt_items").insert({
             receipt_id: newId,
             name: item.name ?? "",
             qty,
-            unit_price: price,
-            total_price: totalPrice,
+            unit_price: unitPrice,
+            total_price: lineTotal.toFixed(2),
           });
         }
         const { data: itemRows } = await supabase.from("receipt_items").select("id").eq("receipt_id", newId).order("created_at", { ascending: true });
@@ -718,8 +835,10 @@ export default function ScanResultScreen() {
             <Ionicons name="arrow-back" size={22} color="#e5e5e5" />
           </Pressable>
           <View style={styles.headerTextWrap}>
-            <Text style={styles.title}>{isEditMode ? "Edit receipt" : isManualMode ? "Manual split" : "Review receipt"}</Text>
-            <Text style={styles.subtitle}>{isEditMode ? "Edit details and split" : isManualMode ? "Enter receipt details and split" : "Assign items and save"}</Text>
+            <Text style={styles.title}>{isEditMode ? "Edit receipt" : isManualMode ? "Quick Split" : "Review receipt"}</Text>
+            <Text style={styles.subtitle}>
+              {isEditMode ? "Edit details and split" : isManualMode ? manualLabels.subtitle : categoryLabel ? `Assign items and save · ${categoryLabel}` : "Assign items and save"}
+            </Text>
           </View>
         </View>
 
@@ -743,16 +862,20 @@ export default function ScanResultScreen() {
                     style={styles.heroMerchantInput}
                     value={merchant}
                     onChangeText={setMerchant}
-                    placeholder="Merchant name"
+                    placeholder={manualLabels.titlePlaceholder}
                     placeholderTextColor="#525252"
                   />
-                  <TextInput
-                    style={styles.heroDateInput}
-                    value={date}
-                    onChangeText={setDate}
-                    placeholder="Date"
-                    placeholderTextColor="#525252"
-                  />
+                  {isRestaurantOrGroceriesManual ? (
+                    <Text style={styles.heroDate}>Today</Text>
+                  ) : (
+                    <TextInput
+                      style={styles.heroDateInput}
+                      value={date}
+                      onChangeText={setDate}
+                      placeholder="Date"
+                      placeholderTextColor="#525252"
+                    />
+                  )}
                 </>
               ) : (
                 <>
@@ -762,14 +885,18 @@ export default function ScanResultScreen() {
               )}
             </View>
             {isManualMode ? (
-              <TextInput
-                style={styles.heroTotalInput}
-                value={total}
-                onChangeText={setTotal}
-                placeholder="0.00"
-                placeholderTextColor="#737373"
-                keyboardType="decimal-pad"
-              />
+              isRestaurantOrGroceriesManual ? (
+                <Text style={styles.heroTotal}>{calculatedTotalFromItems ? formatAmount(calculatedTotalFromItems, currencyCode) : "0.00"}</Text>
+              ) : (
+                <TextInput
+                  style={styles.heroTotalInput}
+                  value={total}
+                  onChangeText={setTotal}
+                  placeholder="0.00"
+                  placeholderTextColor="#737373"
+                  keyboardType="decimal-pad"
+                />
+              )
             ) : (
               <Text style={styles.heroTotal}>{total ? formatAmount(total, currencyCode) : "—"}</Text>
             )}
@@ -801,9 +928,11 @@ export default function ScanResultScreen() {
                     </View>
                   )}
                   <Text style={styles.memberChipText}>{member.username}</Text>
-                  <Pressable onPress={() => removeMember(idx)} hitSlop={8}>
-                    <Ionicons name="close-circle" size={18} color="#737373" />
-                  </Pressable>
+                  {isRestaurantOrGroceriesManual && member.username?.toLowerCase() === profile?.username?.toLowerCase() ? null : (
+                    <Pressable onPress={() => removeMember(idx)} hitSlop={8}>
+                      <Ionicons name="close-circle" size={18} color="#737373" />
+                    </Pressable>
+                  )}
                 </View>
               ))}
             </View>
@@ -844,8 +973,10 @@ export default function ScanResultScreen() {
                             <Text style={styles.itemQtyLabel}>Qty</Text>
                             <TextInput
                               style={styles.itemQtyInput}
-                              value={String(item.qty ?? 1)}
-                              onChangeText={(v) => updateItem(index, "qty", parseInt(v.replace(/\D/g, ""), 10) || 1)}
+                              value={item.qty === 0 || item.qty === undefined ? "" : String(item.qty)}
+                              onChangeText={(v) => updateItem(index, "qty", v)}
+                              placeholder="1"
+                              placeholderTextColor="#525252"
                               keyboardType="number-pad"
                             />
                           </View>
@@ -939,9 +1070,11 @@ export default function ScanResultScreen() {
         {/* Split summary */}
         {hasAssignedMembers && splitTotals.length > 0 ? (
           <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Split summary</Text>
+            <Text style={[styles.sectionLabel, styles.splitSummaryLabel]}>Split summary</Text>
             <View style={styles.totalsCard}>
-              <Text style={styles.adjustmentNote}>Includes tax, discounts & fees</Text>
+              <Text style={styles.adjustmentNote}>
+                {isManualMode ? "Add tax, tips or fees as a line item if needed." : "Includes tax, discounts & fees"}
+              </Text>
               {splitTotals.map((entry) => (
                 <View key={entry.name} style={styles.totalRow}>
                   <Text style={styles.totalName}>{entry.name}</Text>
@@ -963,24 +1096,47 @@ export default function ScanResultScreen() {
                   <Ionicons name="pie-chart-outline" size={22} color="#8DEB63" />
                   <Text style={styles.modalTitle}>Dynamic split</Text>
                 </View>
-                <Text style={styles.modalHint}>Set share % per person. Total must equal 100%.</Text>
+                <View style={styles.dynamicModeRow}>
+                  <Pressable style={[styles.dynamicModeTab, dynamicSplitMode === "percentage" && styles.dynamicModeTabActive]} onPress={() => switchDynamicMode("percentage")}>
+                    <Text style={[styles.dynamicModeTabText, dynamicSplitMode === "percentage" && styles.dynamicModeTabTextActive]}>%</Text>
+                  </Pressable>
+                  <Pressable style={[styles.dynamicModeTab, dynamicSplitMode === "amount" && styles.dynamicModeTabActive]} onPress={() => switchDynamicMode("amount")}>
+                    <Text style={[styles.dynamicModeTabText, dynamicSplitMode === "amount" && styles.dynamicModeTabTextActive]}>Amount</Text>
+                  </Pressable>
+                  <Pressable style={[styles.dynamicModeTab, dynamicSplitMode === "shares" && styles.dynamicModeTabActive]} onPress={() => switchDynamicMode("shares")}>
+                    <Text style={[styles.dynamicModeTabText, dynamicSplitMode === "shares" && styles.dynamicModeTabTextActive]}>Shares</Text>
+                  </Pressable>
+                </View>
+                <Text style={styles.modalHint}>
+                  {dynamicSplitMode === "percentage" && "Set share % per person. Total must equal 100%."}
+                  {dynamicSplitMode === "amount" && `Enter amount each pays. Line total: ${getCurrency(currencyCode).symbol}${dynamicItemTotal.toFixed(2)}`}
+                  {dynamicSplitMode === "shares" && "Enter whole-number shares (e.g. 1, 2, 3). Split is proportional."}
+                </Text>
                 <View style={styles.modalTotalRow}>
                   <Text style={styles.modalTotalLabel}>Total</Text>
-                  <Text style={[styles.modalTotal, dynamicDraftTotal === 100 && styles.modalTotalOk]}>{dynamicDraftTotal.toFixed(1)}%</Text>
+                  <Text style={[styles.modalTotal, (dynamicSplitMode === "percentage" ? dynamicDraftTotal === 100 : dynamicSplitMode === "amount" ? (dynamicItemTotal > 0 && Math.abs(dynamicDraftTotal - dynamicItemTotal) < 0.02) : dynamicDraftTotal > 0) && styles.modalTotalOk]}>
+                    {dynamicSplitMode === "percentage" && `${dynamicDraftTotal.toFixed(1)}%`}
+                    {dynamicSplitMode === "amount" && `${getCurrency(currencyCode).symbol}${dynamicDraftTotal.toFixed(2)}`}
+                    {dynamicSplitMode === "shares" && `${dynamicDraftTotal} share${dynamicDraftTotal !== 1 ? "s" : ""}`}
+                  </Text>
                 </View>
                 {dynamicAssignees.map((memberIndex) => (
                   <View key={`dynamic-${memberIndex}`} style={styles.modalRow}>
-                    <Text style={styles.modalMember}>{members[memberIndex]?.username ?? `Member ${memberIndex + 1}`}</Text>
+                    <Text style={styles.modalMember} numberOfLines={1}>{members[memberIndex]?.username ?? `Member ${memberIndex + 1}`}</Text>
                     <View style={styles.modalInputWrap}>
                       <TextInput
-                        keyboardType="decimal-pad"
+                        keyboardType={dynamicSplitMode === "shares" ? "number-pad" : "decimal-pad"}
                         value={dynamicDraft[memberIndex] ?? ""}
                         onChangeText={(txt) => updateDynamicDraft(memberIndex, txt)}
                         style={styles.modalInput}
-                        placeholder="0"
+                        placeholder={dynamicSplitMode === "shares" ? "1" : "0"}
                         placeholderTextColor="#525252"
                       />
-                      <Text style={styles.modalPercent}>%</Text>
+                      <Text style={styles.modalSuffix}>
+                        {dynamicSplitMode === "percentage" && "%"}
+                        {dynamicSplitMode === "amount" && getCurrency(currencyCode).symbol}
+                        {dynamicSplitMode === "shares" && " share(s)"}
+                      </Text>
                     </View>
                   </View>
                 ))}
@@ -1186,6 +1342,7 @@ const styles = StyleSheet.create({
 
   section: { marginBottom: 28 },
   sectionLabel: { color: "#737373", fontSize: 12, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 },
+  splitSummaryLabel: { marginBottom: 12 },
   whoSplittingLabel: { marginBottom: 18 },
   sectionHeaderRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
   sectionEditBtn: { flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 6, paddingHorizontal: 10 },
@@ -1316,6 +1473,12 @@ const styles = StyleSheet.create({
   modalInputWrap: { flexDirection: "row", alignItems: "center", gap: 6 },
   modalInput: { minWidth: 72, minHeight: 40, borderRadius: 10, borderWidth: 1, borderColor: "rgba(255,255,255,0.2)", backgroundColor: "#0a0a0a", color: "#e5e5e5", fontSize: 15, textAlign: "right", paddingHorizontal: 10 },
   modalPercent: { color: "#737373", fontSize: 14 },
+  modalSuffix: { color: "#737373", fontSize: 14, minWidth: 52 },
+  dynamicModeRow: { flexDirection: "row", gap: 8, marginBottom: 12 },
+  dynamicModeTab: { flex: 1, paddingVertical: 10, paddingHorizontal: 12, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.06)", borderWidth: 1, borderColor: "rgba(255,255,255,0.08)", alignItems: "center", justifyContent: "center" },
+  dynamicModeTabActive: { backgroundColor: "rgba(141,235,99,0.15)", borderColor: "rgba(141,235,99,0.4)" },
+  dynamicModeTabText: { color: "#737373", fontSize: 13, fontWeight: "600" },
+  dynamicModeTabTextActive: { color: "#8DEB63", fontWeight: "700" },
   modalActions: { flexDirection: "row", justifyContent: "flex-end", gap: 10, marginTop: 16 },
   modalBtnGhost: { minHeight: 44, borderRadius: 12, borderWidth: 1, borderColor: "rgba(255,255,255,0.2)", paddingHorizontal: 18, alignItems: "center", justifyContent: "center" },
   modalBtnFull: { width: "100%" },

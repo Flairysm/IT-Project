@@ -11,6 +11,11 @@ export type Profile = {
   push_token: string | null;
   created_at: string;
   updated_at: string;
+  owed_include_restaurant: boolean;
+  owed_include_travel: boolean;
+  owed_include_groceries: boolean;
+  owed_include_business: boolean;
+  owed_include_others: boolean;
 };
 
 type AuthContextValue = {
@@ -26,6 +31,7 @@ type AuthContextValue = {
   updateDisplayName: (displayName: string) => Promise<void>;
   updateCurrency: (currencyCode: string) => Promise<void>;
   updateAvatarUrl: (avatarUrl: string | null) => Promise<void>;
+  updateSettlementOwedPrefs: (prefs: { restaurant?: boolean; travel?: boolean; groceries?: boolean; business?: boolean; others?: boolean }) => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -33,11 +39,19 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 async function fetchProfile(userId: string): Promise<Profile | null> {
   const { data, error } = await supabase
     .from("profiles")
-    .select("id, username, display_name, default_currency, avatar_url, push_token, created_at, updated_at")
+    .select("id, username, display_name, default_currency, avatar_url, push_token, created_at, updated_at, owed_include_restaurant, owed_include_travel, owed_include_groceries, owed_include_business, owed_include_others")
     .eq("id", userId)
     .single();
   if (error) return null;
-  return data as Profile;
+  const d = data as Record<string, unknown>;
+  return {
+    ...d,
+    owed_include_restaurant: d?.owed_include_restaurant !== false,
+    owed_include_travel: d?.owed_include_travel !== false,
+    owed_include_groceries: d?.owed_include_groceries !== false,
+    owed_include_business: d?.owed_include_business !== false,
+    owed_include_others: d?.owed_include_others !== false,
+  } as Profile;
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -177,6 +191,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [refreshProfile]
   );
 
+  const updateSettlementOwedPrefs = useCallback(
+    async (prefs: { restaurant?: boolean; travel?: boolean; groceries?: boolean; business?: boolean; others?: boolean }) => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error("Not signed in");
+      // Optimistic update so the UI feels instant
+      if (profile) {
+        setProfile({
+          ...profile,
+          ...(prefs.restaurant !== undefined && { owed_include_restaurant: prefs.restaurant }),
+          ...(prefs.travel !== undefined && { owed_include_travel: prefs.travel }),
+          ...(prefs.groceries !== undefined && { owed_include_groceries: prefs.groceries }),
+          ...(prefs.business !== undefined && { owed_include_business: prefs.business }),
+          ...(prefs.others !== undefined && { owed_include_others: prefs.others }),
+        });
+      }
+      const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+      if (prefs.restaurant !== undefined) updates.owed_include_restaurant = prefs.restaurant;
+      if (prefs.travel !== undefined) updates.owed_include_travel = prefs.travel;
+      if (prefs.groceries !== undefined) updates.owed_include_groceries = prefs.groceries;
+      if (prefs.business !== undefined) updates.owed_include_business = prefs.business;
+      if (prefs.others !== undefined) updates.owed_include_others = prefs.others;
+      const { error } = await supabase.from("profiles").update(updates).eq("id", user.id);
+      if (error) {
+        await refreshProfile();
+        throw error;
+      }
+    },
+    [profile, refreshProfile]
+  );
+
   const value = useMemo<AuthContextValue>(
     () => ({
       loading,
@@ -191,8 +235,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       updateDisplayName,
       updateCurrency,
       updateAvatarUrl,
+      updateSettlementOwedPrefs,
     }),
-    [loading, session, profile, signUp, login, logout, refreshProfile, updateUsername, updateDisplayName, updateCurrency, updateAvatarUrl]
+    [loading, session, profile, signUp, login, logout, refreshProfile, updateUsername, updateDisplayName, updateCurrency, updateAvatarUrl, updateSettlementOwedPrefs]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -1,6 +1,7 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
+  Image,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -17,6 +18,7 @@ import { useAuth } from "../auth-context";
 import { supabase } from "../lib/supabase";
 import { formatAmount } from "../lib/currency";
 import { SubscriptionDiamond } from "../components/SubscriptionDiamond";
+import { QUICK_SPLIT_CATEGORIES } from "../lib/quickSplitCategories";
 
 type HistoryRow = {
   id: string;
@@ -25,9 +27,27 @@ type HistoryRow = {
   total: string | null;
   paid: boolean;
   amount_due: string;
+  category?: string | null;
+  split_totals?: { name?: string }[];
 };
+type ExpenseGroupRow = { id: string; name: string; category: string; created_at: string; entryCount: number; memberCount: number; host_id?: string; member_ids: string[] };
 
 type HistoryFilter = "all" | "paid" | "unpaid";
+type HistoryCategoryTab = "all" | "restaurant" | "travel" | "groceries" | "business" | "others";
+
+type HistoryListItem =
+  | { type: "receipt"; id: string; title: string; date: string; category: string; meta: string; amountLabel: string; row: HistoryRow }
+  | { type: "trip"; id: string; title: string; date: string; category: string; meta: string; amountLabel: string; group: ExpenseGroupRow };
+
+function getCategoryIcon(category: string): keyof typeof Ionicons.glyphMap {
+  const found = QUICK_SPLIT_CATEGORIES.find((c) => c.id === category);
+  return found?.icon ?? "ellipsis-horizontal-circle-outline";
+}
+
+function memberInitial(name: string): string {
+  const s = (name || "?").trim();
+  return s ? s.charAt(0).toUpperCase() : "?";
+}
 
 function receiptInitial(merchant: string | null): string {
   const s = (merchant || "?").trim();
@@ -60,6 +80,78 @@ export default function HistoryTabScreen() {
   const [filter, setFilter] = useState<HistoryFilter>("all");
   const [refreshing, setRefreshing] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
+  const [expenseGroups, setExpenseGroups] = useState<ExpenseGroupRow[]>([]);
+  const [categoryTab, setCategoryTab] = useState<HistoryCategoryTab>("all");
+  const [historyHostProfiles, setHistoryHostProfiles] = useState<Record<string, { username: string; avatar_url: string | null }>>({});
+  const [historyReceiptAvatarMap, setHistoryReceiptAvatarMap] = useState<Record<string, string | null>>({});
+
+  const loadExpenseGroups = useCallback(async () => {
+    if (!user?.id) {
+      setExpenseGroups([]);
+      setHistoryHostProfiles({});
+      return;
+    }
+    try {
+      const { data: groups, error } = await supabase.from("expense_groups").select("id, name, category, created_at, host_id").order("created_at", { ascending: false });
+      if (error) throw new Error(error.message);
+      const ids = (groups ?? []).map((g: { id: string }) => g.id);
+      if (ids.length === 0) {
+        setExpenseGroups([]);
+        setHistoryHostProfiles({});
+        return;
+      }
+      const { data: entries } = await supabase.from("expense_entries").select("group_id").in("group_id", ids);
+      const { data: mems } = await supabase.from("expense_group_members").select("group_id, user_id").in("group_id", ids);
+      const entryCountByGroup: Record<string, number> = {};
+      const memberCountByGroup: Record<string, number> = {};
+      const memberIdsByGroup: Record<string, string[]> = {};
+      for (const id of ids) {
+        entryCountByGroup[id] = 0;
+        memberCountByGroup[id] = 0;
+        memberIdsByGroup[id] = [];
+      }
+      for (const e of entries ?? []) {
+        const gid = (e as { group_id: string }).group_id;
+        if (gid) entryCountByGroup[gid] = (entryCountByGroup[gid] ?? 0) + 1;
+      }
+      for (const m of mems ?? []) {
+        const gid = (m as { group_id: string }).group_id;
+        const uid = (m as { user_id: string }).user_id;
+        if (gid) memberCountByGroup[gid] = (memberCountByGroup[gid] ?? 0) + 1;
+        if (gid && uid) (memberIdsByGroup[gid] ??= []).push(uid);
+      }
+      const hostIds = [...new Set((groups as { host_id?: string }[]).map((g) => g.host_id).filter(Boolean))] as string[];
+      const allUserIds = new Set(hostIds);
+      for (const mids of Object.values(memberIdsByGroup)) mids.forEach((id) => allUserIds.add(id));
+      let hostProfiles: Record<string, { username: string; avatar_url: string | null }> = {};
+      if (allUserIds.size > 0) {
+        const { data: profiles } = await supabase.from("profiles").select("id, username, avatar_url").in("id", [...allUserIds]);
+        for (const p of profiles ?? []) {
+          const id = (p as { id: string }).id;
+          hostProfiles[id] = {
+            username: (p as { username?: string }).username ?? "—",
+            avatar_url: (p as { avatar_url?: string | null }).avatar_url ?? null,
+          };
+        }
+      }
+      setHistoryHostProfiles(hostProfiles);
+      setExpenseGroups(
+        (groups ?? []).map((g: { id: string; name: string; category: string; created_at: string; host_id?: string }) => ({
+          id: g.id,
+          name: g.name,
+          category: g.category ?? "travel",
+          created_at: g.created_at,
+          entryCount: entryCountByGroup[g.id] ?? 0,
+          memberCount: memberCountByGroup[g.id] ?? 0,
+          host_id: g.host_id,
+          member_ids: memberIdsByGroup[g.id] ?? [],
+        }))
+      );
+    } catch {
+      setExpenseGroups([]);
+      setHistoryHostProfiles({});
+    }
+  }, [user?.id]);
 
   const loadReceipts = useCallback(async () => {
     if (!user?.id) {
@@ -72,7 +164,7 @@ export default function HistoryTabScreen() {
     try {
       const { data: raw, error: e } = await supabase
         .from("receipts")
-        .select("id, merchant, receipt_date, total_amount, paid, split_totals, paid_members")
+        .select("id, merchant, receipt_date, total_amount, paid, split_totals, paid_members, category")
         .eq("host_id", user.id)
         .order("created_at", { ascending: false });
       if (e) throw new Error(e.message);
@@ -97,6 +189,8 @@ export default function HistoryTabScreen() {
           total: totalRaw ?? null,
           paid: Boolean(r.paid),
           amount_due: amountDue,
+          category: (r as { category?: string | null }).category ?? "others",
+          split_totals: splitTotals,
         };
       });
       setRows(list);
@@ -110,21 +204,59 @@ export default function HistoryTabScreen() {
   useFocusEffect(
     useCallback(() => {
       void loadReceipts();
-    }, [loadReceipts])
+      void loadExpenseGroups();
+    }, [loadReceipts, loadExpenseGroups])
   );
 
   const onRefreshHistory = useCallback(async () => {
     setRefreshing(true);
     try {
-      await loadReceipts();
+      await Promise.all([loadReceipts(), loadExpenseGroups()]);
     } finally {
       setRefreshing(false);
     }
-  }, [loadReceipts]);
+  }, [loadReceipts, loadExpenseGroups]);
+
+  useEffect(() => {
+    const usernames = new Set<string>();
+    if (profile?.username) usernames.add(profile.username);
+    for (const row of rows) {
+      for (const s of row.split_totals ?? []) {
+        const name = s?.name?.trim();
+        if (name) usernames.add(name);
+      }
+    }
+    const list = [...usernames];
+    if (list.length === 0) {
+      setHistoryReceiptAvatarMap({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await supabase.from("profiles").select("username, avatar_url").in("username", list.slice(0, 100));
+        if (cancelled) return;
+        const map: Record<string, string | null> = {};
+        if (profile?.username) map[profile.username.toLowerCase()] = profile.avatar_url ?? null;
+        for (const p of data ?? []) {
+          const u = (p as { username?: string }).username;
+          if (u) map[u.toLowerCase()] = (p as { avatar_url?: string | null }).avatar_url ?? null;
+        }
+        setHistoryReceiptAvatarMap(map);
+      } catch {
+        if (!cancelled) setHistoryReceiptAvatarMap({});
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [rows, profile?.username, profile?.avatar_url]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return rows.filter((row) => {
+      if (categoryTab !== "all") {
+        const rowCat = row.category ?? "others";
+        if (rowCat !== categoryTab) return false;
+      }
       if (filter === "paid" && !row.paid) return false;
       if (filter === "unpaid" && row.paid) return false;
       if (!q) return true;
@@ -133,10 +265,47 @@ export default function HistoryTabScreen() {
       const total = (row.total || "").toLowerCase();
       return merchant.includes(q) || date.includes(q) || total.includes(q) || row.id.includes(q);
     });
-  }, [filter, rows, search]);
+  }, [categoryTab, filter, rows, search]);
+
+  const filteredGroups = useMemo(() => {
+    if (categoryTab === "all") return expenseGroups;
+    if (categoryTab === "travel") return expenseGroups.filter((g) => g.category === "travel");
+    if (categoryTab === "business") return expenseGroups.filter((g) => g.category === "business");
+    return [];
+  }, [categoryTab, expenseGroups]);
 
   const paidCount = useMemo(() => rows.filter((r) => r.paid).length, [rows]);
   const unpaidCount = useMemo(() => rows.filter((r) => !r.paid).length, [rows]);
+
+  const historyListItems = useMemo((): HistoryListItem[] => {
+    const receiptItems: HistoryListItem[] = filtered.map((row) => ({
+      type: "receipt",
+      id: row.id,
+      title: row.merchant || "Receipt",
+      date: row.date || "",
+      category: row.category ?? "others",
+      meta: row.paid ? "Paid" : "Unpaid",
+      amountLabel: row.total ? formatAmount(row.total, currencyCode) : "—",
+      row,
+    }));
+    const tripItems: HistoryListItem[] = filteredGroups.map((g) => ({
+      type: "trip",
+      id: g.id,
+      title: g.name,
+      date: g.created_at,
+      category: g.category,
+      meta: `${g.memberCount} people · ${g.entryCount} expense${g.entryCount !== 1 ? "s" : ""}`,
+      amountLabel: "—",
+      group: g,
+    }));
+    const combined = [...receiptItems, ...tripItems];
+    combined.sort((a, b) => {
+      const da = new Date(a.date).getTime();
+      const db = new Date(b.date).getTime();
+      return db - da;
+    });
+    return combined;
+  }, [filtered, filteredGroups, currencyCode]);
 
   const deleteReceipt = useCallback(
     async (id: string) => {
@@ -177,30 +346,19 @@ export default function HistoryTabScreen() {
           <SubscriptionDiamond />
         </View>
 
-        {rows.length > 0 ? (
-          <View style={styles.summaryRow}>
-            <View style={styles.summaryChip}>
-              <Ionicons name="receipt-outline" size={16} color="#8DEB63" />
-              <Text style={styles.summaryChipText}>{rows.length} receipt{rows.length !== 1 ? "s" : ""}</Text>
-            </View>
-            {unpaidCount > 0 ? (
-              <View style={styles.summaryChipUnpaid}>
-                <Text style={styles.summaryChipUnpaidText}>{unpaidCount} unpaid</Text>
-              </View>
-            ) : null}
-          </View>
-        ) : null}
-
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionLabel}>Receipts</Text>
-            <Pressable
-              style={({ pressed }) => [styles.searchPill, pressed && styles.pressed]}
-              onPress={() => setSearchFocused(true)}
-            >
-              <Ionicons name="search" size={16} color="#a3a3a3" />
-              <Text style={styles.searchPillText}>Search</Text>
+        <View style={styles.sectionCard}>
+          <Text style={styles.sectionTitle}>History</Text>
+          <View style={styles.settlementTabRow}>
+            <Pressable style={[styles.settlementTab, categoryTab === "all" && styles.settlementTabActive]} onPress={() => setCategoryTab("all")}>
+              <Ionicons name="apps-outline" size={16} color={categoryTab === "all" ? "#8DEB63" : "#737373"} />
+              <Text style={[styles.settlementTabText, categoryTab === "all" && styles.settlementTabTextActive]} numberOfLines={1}>All</Text>
             </Pressable>
+            {QUICK_SPLIT_CATEGORIES.map((cat) => (
+              <Pressable key={cat.id} style={[styles.settlementTab, categoryTab === cat.id && styles.settlementTabActive]} onPress={() => setCategoryTab(cat.id)}>
+                <Ionicons name={cat.icon} size={16} color={categoryTab === cat.id ? "#8DEB63" : "#737373"} />
+                <Text style={[styles.settlementTabText, categoryTab === cat.id && styles.settlementTabTextActive]} numberOfLines={1}>{cat.label}</Text>
+              </Pressable>
+            ))}
           </View>
           {searchFocused ? (
             <View style={styles.searchRow}>
@@ -209,7 +367,7 @@ export default function HistoryTabScreen() {
                 value={search}
                 onChangeText={setSearch}
                 style={styles.searchInput}
-                placeholder="Merchant, date, total..."
+                placeholder="Search merchant, date..."
                 placeholderTextColor="#525252"
                 autoFocus
                 onBlur={() => setSearchFocused(!!search.trim())}
@@ -219,38 +377,15 @@ export default function HistoryTabScreen() {
               </Pressable>
             </View>
           ) : null}
-
-          <View style={styles.tabRow}>
-            {(["all", "paid", "unpaid"] as const).map((f) => (
-              <Pressable
-                key={f}
-                style={[styles.tab, filter === f && styles.tabActive]}
-                onPress={() => setFilter(f)}
-              >
-                <Text style={[styles.tabText, filter === f && styles.tabTextActive]}>
-                  {f === "all" ? "All" : f === "paid" ? "Paid" : "Unpaid"}
-                </Text>
-                {f === "all" && rows.length > 0 ? (
-                  <View style={styles.tabBadge}>
-                    <Text style={styles.tabBadgeText}>{rows.length}</Text>
-                  </View>
-                ) : null}
-                {f === "paid" && paidCount > 0 ? (
-                  <View style={styles.tabBadge}>
-                    <Text style={styles.tabBadgeText}>{paidCount}</Text>
-                  </View>
-                ) : null}
-                {f === "unpaid" && unpaidCount > 0 ? (
-                  <View style={[styles.tabBadge, styles.tabBadgeAlert]}>
-                    <Text style={styles.tabBadgeText}>{unpaidCount}</Text>
-                  </View>
-                ) : null}
-              </Pressable>
-            ))}
-          </View>
+          {!searchFocused ? (
+            <Pressable style={({ pressed }) => [styles.searchPill, pressed && styles.pressed]} onPress={() => setSearchFocused(true)}>
+              <Ionicons name="search" size={16} color="#a3a3a3" />
+              <Text style={styles.searchPillText}>Search</Text>
+            </Pressable>
+          ) : null}
 
           {loading ? (
-            <Text style={styles.meta}>Loading...</Text>
+            <Text style={styles.historyMeta}>Loading...</Text>
           ) : error ? (
             <View style={styles.errorWrap}>
               <View style={styles.errorRow}>
@@ -269,61 +404,110 @@ export default function HistoryTabScreen() {
                 </Pressable>
               </View>
             </View>
-          ) : !filtered.length ? (
+          ) : !historyListItems.length ? (
             <View style={styles.emptyState}>
               <View style={styles.emptyIconWrap}>
                 <Ionicons name="receipt-outline" size={44} color="#525252" />
               </View>
               <Text style={styles.emptyTitle}>
-                {rows.length === 0 ? "No receipts yet" : search.trim() || filter !== "all" ? "No matches" : "No receipts"}
+                {categoryTab !== "all"
+                  ? `Nothing in ${QUICK_SPLIT_CATEGORIES.find((c) => c.id === categoryTab)?.label ?? categoryTab}`
+                  : "No history yet"}
               </Text>
               <Text style={styles.emptySub}>
-                {rows.length === 0
-                  ? "Scan a receipt from Home to see it here."
-                  : "Try a different search or filter."}
+                {categoryTab !== "all" ? "Try another category or add from Home." : "Scan a receipt or create a trip from Home."}
               </Text>
             </View>
           ) : (
-            <View style={styles.cardList}>
-              {filtered.map((row, idx) => (
-                <View key={row.id} style={[styles.receiptCard, idx === filtered.length - 1 && styles.receiptCardLast]}>
+            <>
+              {historyListItems.map((item) => {
+                const createdByName = item.type === "receipt"
+                  ? (profile?.display_name?.trim() || profile?.username || "You")
+                  : (item.group.host_id ? historyHostProfiles[item.group.host_id]?.username ?? "—" : "—");
+                const avatarKeysReceipt = item.type === "receipt"
+                  ? [...new Set([profile?.username, ...(item.row.split_totals ?? []).map((s) => s?.name).filter(Boolean)] as string[])]
+                  : [];
+                const avatarIdsTrip = item.type === "trip"
+                  ? [...new Set([item.group.host_id, ...(item.group.member_ids ?? [])].filter(Boolean) as string[])]
+                  : [];
+                return (
                   <Pressable
-                    style={styles.receiptCardMain}
-                    onPress={() => router.push({ pathname: "/history/[id]", params: { id: row.id } })}
+                    key={item.type === "receipt" ? `r-${item.id}` : `t-${item.id}`}
+                    style={({ pressed }) => [styles.historyRow, pressed && styles.actionBtnPressed]}
+                    onPress={() => {
+                      if (item.type === "receipt") {
+                        router.push({ pathname: "/history/[id]", params: { id: item.id } });
+                      } else {
+                        router.push({ pathname: "/expense-group", params: { groupId: item.id, category: item.category } });
+                      }
+                    }}
                   >
-                    <View style={[styles.receiptIconWrap, row.paid ? styles.receiptIconPaid : styles.receiptIconUnpaid]}>
-                      <Text style={[styles.receiptIconText, row.paid ? styles.receiptIconTextPaid : styles.receiptIconTextUnpaid]}>{receiptInitial(row.merchant)}</Text>
+                    <View style={styles.historyRowIconWrap}>
+                      <Ionicons name={getCategoryIcon(item.category)} size={22} color="#8DEB63" />
                     </View>
-                    <View style={styles.receiptBody}>
-                      <Text style={styles.receiptMerchant} numberOfLines={1}>{row.merchant || "Unknown"}</Text>
-                      <Text style={styles.receiptDate}>{formatDisplayDate(row.date)}</Text>
-                      <View style={styles.receiptAmounts}>
-                        <Text style={styles.receiptTotal}>
-                          Total {row.total ? formatAmount(row.total, currencyCode) : "—"}
-                        </Text>
-                        {!row.paid && parseFloat(row.amount_due) > 0 ? (
-                          <Text style={styles.receiptDue}>Due {formatAmount(row.amount_due, currencyCode)}</Text>
+                    <View style={styles.historyRowLeft}>
+                      <Text style={styles.historyRowTitle} numberOfLines={1}>{item.title}</Text>
+                      <Text style={styles.historyRowDate}>{formatDisplayDate(item.date)}</Text>
+                      <Text style={styles.historyRowCreatedBy}>Created by {createdByName}</Text>
+                      <View style={styles.historyAvatarsRow}>
+                        {item.type === "receipt"
+                          ? avatarKeysReceipt.slice(0, 7).map((username, i) => {
+                              const url = username ? historyReceiptAvatarMap[username.toLowerCase()] : null;
+                              const initial = memberInitial(username ?? "?");
+                              return (
+                                <View key={`${item.id}-${username}-${i}`} style={[styles.historyAvatar, { marginLeft: i === 0 ? 0 : -6 }]}>
+                                  {url ? (
+                                    <Image source={{ uri: url }} style={styles.historyAvatarImg} />
+                                  ) : (
+                                    <View style={styles.historyAvatarPlaceholder}>
+                                      <Text style={styles.historyAvatarText}>{initial}</Text>
+                                    </View>
+                                  )}
+                                </View>
+                              );
+                            })
+                          : avatarIdsTrip.slice(0, 7).map((uid, i) => {
+                              const prof = uid ? historyHostProfiles[uid] : null;
+                              const url = prof?.avatar_url ?? null;
+                              const initial = memberInitial(prof?.username ?? "?");
+                              return (
+                                <View key={`${item.id}-${uid}-${i}`} style={[styles.historyAvatar, { marginLeft: i === 0 ? 0 : -6 }]}>
+                                  {url ? (
+                                    <Image source={{ uri: url }} style={styles.historyAvatarImg} />
+                                  ) : (
+                                    <View style={styles.historyAvatarPlaceholder}>
+                                      <Text style={styles.historyAvatarText}>{initial}</Text>
+                                    </View>
+                                  )}
+                                </View>
+                              );
+                            })}
+                        {(item.type === "receipt" ? avatarKeysReceipt.length : avatarIdsTrip.length) > 7 ? (
+                          <View style={[styles.historyAvatarMore, { marginLeft: -6 }]}>
+                            <Text style={styles.historyAvatarMoreText}>
+                              +{(item.type === "receipt" ? avatarKeysReceipt.length : avatarIdsTrip.length) - 7}
+                            </Text>
+                          </View>
                         ) : null}
                       </View>
                     </View>
-                    <View style={styles.receiptRight}>
-                      <View style={[styles.statusPill, row.paid ? styles.statusPillPaid : styles.statusPillUnpaid]}>
-                        <Text style={[styles.statusPillText, row.paid ? styles.statusPillTextPaid : styles.statusPillTextUnpaid]}>
-                          {row.paid ? "Paid" : "Unpaid"}
-                        </Text>
-                      </View>
+                    <View style={styles.historyRowRight}>
+                      <Text style={styles.historyRowAmount}>{item.amountLabel}</Text>
+                      {item.type === "receipt" ? (
+                        <Pressable
+                          style={({ pressed: p }) => [styles.historyRowDelete, p && styles.pressed]}
+                          onPress={(e) => { e.stopPropagation(); confirmDelete(item.row); }}
+                          hitSlop={8}
+                        >
+                          <Ionicons name="trash-outline" size={18} color="#737373" />
+                        </Pressable>
+                      ) : null}
                       <Ionicons name="chevron-forward" size={18} color="#737373" />
                     </View>
                   </Pressable>
-                  <Pressable
-                    style={({ pressed }) => [styles.deleteBtn, pressed && styles.pressed]}
-                    onPress={() => confirmDelete(row)}
-                  >
-                    <Ionicons name="trash-outline" size={18} color="#fca5a5" />
-                  </Pressable>
-                </View>
-              ))}
-            </View>
+                );
+              })}
+            </>
           )}
         </View>
       </ScrollView>
@@ -340,6 +524,21 @@ const styles = StyleSheet.create({
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 20, marginBottom: 16 },
   title: { color: "#fff", fontSize: 28, fontWeight: "800", marginBottom: 4 },
   subtitle: { color: "#a3a3a3", fontSize: 14 },
+  categoryTabRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingHorizontal: 20, marginBottom: 16 },
+  categoryTab: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  categoryTabActive: { backgroundColor: "rgba(141,235,99,0.12)", borderColor: "rgba(141,235,99,0.35)" },
+  categoryTabText: { color: "#a3a3a3", fontSize: 13, fontWeight: "600" },
+  categoryTabTextActive: { color: "#8DEB63", fontWeight: "700" },
   summaryRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 20, marginBottom: 20 },
   summaryChip: {
     flexDirection: "row",
@@ -362,6 +561,79 @@ const styles = StyleSheet.create({
     borderColor: "rgba(251,191,36,0.3)",
   },
   summaryChipUnpaidText: { color: "#fbbf24", fontSize: 12, fontWeight: "600" },
+  sectionCard: {
+    marginTop: 16,
+    marginHorizontal: 16,
+    borderRadius: 18,
+    backgroundColor: "#141414",
+    padding: 14,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  sectionTitle: { color: "#e5e5e5", fontSize: 20, fontWeight: "700", marginBottom: 10 },
+  settlementTabRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 14 },
+  settlementTab: { flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.06)", borderWidth: 1, borderColor: "rgba(255,255,255,0.08)" },
+  settlementTabActive: { backgroundColor: "rgba(141,235,99,0.15)", borderColor: "rgba(141,235,99,0.35)" },
+  settlementTabText: { color: "#a3a3a3", fontSize: 12, fontWeight: "600", maxWidth: 72 },
+  settlementTabTextActive: { color: "#8DEB63", fontWeight: "700" },
+  historyMeta: { color: "#737373", fontSize: 14, marginBottom: 10 },
+  historyRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.04)",
+    marginBottom: 8,
+  },
+  historyRowIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.06)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
+  },
+  historyRowLeft: { flex: 1, minWidth: 0, marginRight: 12 },
+  historyRowTitle: { color: "#fff", fontSize: 17, fontWeight: "700", marginBottom: 2 },
+  historyRowDate: { color: "#737373", fontSize: 13, marginBottom: 2 },
+  historyRowCreatedBy: { color: "#737373", fontSize: 12, marginBottom: 4 },
+  historyRowMeta: { color: "#737373", fontSize: 12, marginBottom: 0 },
+  historyAvatarsRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap" },
+  historyAvatar: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 2,
+    borderColor: "#141414",
+    overflow: "hidden",
+  },
+  historyAvatarImg: { width: "100%", height: "100%" },
+  historyAvatarPlaceholder: {
+    width: "100%",
+    height: "100%",
+    backgroundColor: "rgba(141,235,99,0.35)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  historyAvatarText: { color: "#8DEB63", fontSize: 10, fontWeight: "700" },
+  historyAvatarMore: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 2,
+    borderColor: "#141414",
+    backgroundColor: "rgba(255,255,255,0.15)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  historyAvatarMoreText: { color: "#a3a3a3", fontSize: 10, fontWeight: "700" },
+  historyRowRight: { flexDirection: "row", alignItems: "center", gap: 8 },
+  historyRowAmount: { color: "#a3a3a3", fontSize: 15, fontWeight: "600" },
+  historyRowDelete: { padding: 4 },
+  actionBtnPressed: { opacity: 0.9 },
   section: { paddingHorizontal: 20 },
   sectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
   sectionLabel: { color: "#e5e5e5", fontSize: 15, fontWeight: "700" },
@@ -375,6 +647,7 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.06)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.1)",
+    marginBottom: 12,
   },
   searchPillText: { color: "#a3a3a3", fontSize: 13, fontWeight: "600" },
   searchRow: {
@@ -483,6 +756,8 @@ const styles = StyleSheet.create({
   receiptAmounts: { flexDirection: "row", alignItems: "center", gap: 12, flexWrap: "wrap" },
   receiptTotal: { color: "#a3a3a3", fontSize: 13 },
   receiptDue: { color: "#fbbf24", fontSize: 13, fontWeight: "600" },
+  tripsSubtitle: { color: "#737373", fontSize: 13, marginBottom: 12 },
+  tripMeta: { color: "#a3a3a3", fontSize: 13, marginTop: 2 },
   receiptRight: { flexDirection: "row", alignItems: "center", gap: 10 },
   statusPill: {
     paddingVertical: 4,
