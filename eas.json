@@ -21,7 +21,7 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_OCR_URL": "https://ezsplit-ocr.onrender.com"
+        "EXPO_PUBLIC_OCR_URL": "https://ezsplit-ocr-sg.onrender.com"
       }
     },
     "production": {
@@ -30,7 +30,7 @@
         "resourceClass": "m-medium"
       },
       "env": {
-        "EXPO_PUBLIC_OCR_URL": "https://ezsplit-ocr.onrender.com",
+        "EXPO_PUBLIC_OCR_URL": "https://ezsplit-ocr-sg.onrender.com",
         "NPM_CONFIG_LEGACY_PEER_DEPS": "true"
       }
     }

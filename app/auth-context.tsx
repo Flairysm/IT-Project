@@ -72,26 +72,46 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, nextSession) => {
       setSession(nextSession);
-      if (nextSession?.user) {
-        const p = await fetchProfile(nextSession.user.id);
-        setProfile(p);
-      } else {
-        setProfile(null);
+      try {
+        if (nextSession?.user) {
+          const p = await fetchProfile(nextSession.user.id);
+          setProfile(p);
+        } else {
+          setProfile(null);
+        }
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     });
 
-    (async () => {
-      const { data: { session: s } } = await supabase.auth.getSession();
-      setSession(s);
-      if (s?.user) {
-        const p = await fetchProfile(s.user.id);
-        setProfile(p);
+    let cancelled = false;
+    const init = async () => {
+      try {
+        const { data: { session: s } } = await supabase.auth.getSession();
+        if (cancelled) return;
+        setSession(s);
+        if (s?.user) {
+          const p = await fetchProfile(s.user.id);
+          if (cancelled) return;
+          setProfile(p);
+        }
+      } catch {
+        // Ensure we never stay stuck on loading
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-      setLoading(false);
-    })();
+    };
+    init();
+    const t = setTimeout(() => {
+      cancelled = true;
+      setLoading((prev) => (prev ? false : prev));
+    }, 8000);
 
-    return () => subscription.unsubscribe();
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+      subscription.unsubscribe();
+    };
   }, []);
 
   const signUp = useCallback(

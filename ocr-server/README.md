@@ -26,7 +26,7 @@ The server is built for multi-tenant use:
 1. Push this repo to GitHub.
 2. In [Render](https://render.com): **New → Blueprint**, connect the repo, and select the root `render.yaml`.
 3. Deploy. Render will build the Docker image from `ocr-server/` and run the server.
-4. Copy the service URL (e.g. `https://ezsplit-ocr.onrender.com`).
+4. Copy the service URL (e.g. `https://ezsplit-ocr-sg.onrender.com`).
 5. In Render dashboard → **Environment**, add:
    - **`OPENAI_API_KEY`** (recommended): your OpenAI API key (`sk-...`). Without it, the server uses Tesseract-only OCR and extracted details (merchant, items, totals) are often inaccurate. With it, the server uses GPT-4 Vision for much better extraction. Costs per image via OpenAI.
    - (Optional) `OCR_API_KEY`: secret key; add the same value in the app as `EXPO_PUBLIC_OCR_API_KEY` so only your app can call the API.

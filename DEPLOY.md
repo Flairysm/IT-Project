@@ -19,7 +19,7 @@ Follow these steps in order to deploy EZSplit to the App Store (e.g. for a diplo
 
 ## Step 2: Deploy the OCR server (Render)
 
-Receipt scanning in the app needs a live OCR server. Your project is set to use `https://ezsplit-ocr.onrender.com`.
+Receipt scanning in the app needs a live OCR server. Your project is set to use `https://ezsplit-ocr-sg.onrender.com`.
 
 1. Go to [render.com](https://render.com) and sign in (or create an account).
 2. **New → Blueprint** (or **New → Web Service**).
@@ -29,10 +29,10 @@ Receipt scanning in the app needs a live OCR server. Your project is set to use 
    - Set **Root Directory** to `ocr-server` for the service (if the form asks).
 5. If creating a **Web Service** manually:
    - **Build**: Docker; Dockerfile path: `ocr-server/Dockerfile`; Docker context: `ocr-server`.
-   - **Service name**: `ezsplit-ocr` (so the URL is `https://ezsplit-ocr.onrender.com`).
+   - **Service name**: `ezsplit-ocr` (so the URL is `https://ezsplit-ocr-sg.onrender.com`).
    - **Environment**: Add `PORT` = `3080`.
 6. Deploy. Wait until the service is **Live**.
-7. Open `https://ezsplit-ocr.onrender.com` in a browser. You should see a response or “OK” (not an error).  
+7. Open `https://ezsplit-ocr-sg.onrender.com` in a browser. You should see a response or “OK” (not an error).  
    If your service name is different, note the URL and update **Step 5** (EAS build) to use that URL.
 
 8. **Enable accurate extraction (OpenAI Vision):** Without this, the server uses Tesseract-only OCR and details (merchant, items, totals) are often wrong. In Render → your **ezsplit-ocr** service → **Environment** → **Add Environment Variable**:
@@ -87,7 +87,7 @@ Save both URLs; you’ll add them in App Store Connect (Step 6).
 
 ## Step 5: Build the app with EAS
 
-Your project already has **production** and **preview** profiles in `eas.json` with `EXPO_PUBLIC_OCR_URL` set to `https://ezsplit-ocr.onrender.com`. If your OCR URL is different, change it in `eas.json` under `build.production.env` or set it as a secret in the EAS dashboard.
+Your project already has **production** and **preview** profiles in `eas.json` with `EXPO_PUBLIC_OCR_URL` set to `https://ezsplit-ocr-sg.onrender.com`. If your OCR URL is different, change it in `eas.json` under `build.production.env` or set it as a secret in the EAS dashboard.
 
 1. In the project root:
    ```bash
@@ -152,8 +152,8 @@ Then run the build again (or use the same command; EAS injects secrets into the 
 
 ## Step 8: After deployment
 
-- **OCR**: Uses `https://ezsplit-ocr.onrender.com` (or the URL you set). Ensure the Render service stays running and the URL is reachable.
-- **Faster scanning (aim for 5–10s):** (1) Set `OPENAI_API_KEY` on Render so the server uses GPT-4 Vision (faster and more accurate than Tesseract). (2) Keep the service warm: on Render free tier, the first request after idle can take 30–60s (cold start). Use a free cron (e.g. [cron-job.org](https://cron-job.org) or [UptimeRobot](https://uptimerobot.com)) to hit `GET https://ezsplit-ocr.onrender.com/health` every 10–14 minutes so the server stays warm. (3) The app resizes and compresses images on device before upload; the server uses a 1024px max for processing—both help speed.
+- **OCR**: Uses `https://ezsplit-ocr-sg.onrender.com` (or the URL you set). Ensure the Render service stays running and the URL is reachable.
+- **Faster scanning (aim for 5–10s):** (1) Set `OPENAI_API_KEY` on the **Singapore** Render service so the server uses GPT-4 Vision (much faster than Tesseract). (2) Keep the service warm: on Render free tier, the first request after idle can take **30–60s** (cold start). Use a free cron (e.g. [cron-job.org](https://cron-job.org) or [UptimeRobot](https://uptimerobot.com)) to hit `GET https://ezsplit-ocr-sg.onrender.com/health` every 10–14 minutes. (3) The app resizes and compresses images before upload—both help speed.
 - **Notifications**: Users enable them in the app (Settings → Notifications). Reminders work if APNs was set up (EAS usually does this when you built with “Let EAS handle it” and allowed push).
 - **Updates**: Change version in `app.json` if needed, then run `eas build --platform ios --profile production` again and submit a new build in App Store Connect.
 
@@ -164,7 +164,7 @@ Then run the build again (or use the same command; EAS injects secrets into the 
 | Step | What |
 |------|------|
 | 1 | Apple Developer, Expo account, EAS CLI, splash/logo assets |
-| 2 | Deploy OCR server to Render → `https://ezsplit-ocr.onrender.com` |
+| 2 | Deploy OCR server to Render → `https://ezsplit-ocr-sg.onrender.com` |
 | 3 | Host `docs/privacy-policy.html` and `terms-of-service.html` (e.g. GitHub Pages) |
 | 4 | Create app in App Store Connect (Bundle ID: `com.flairysm.ezsplit`) |
 | 5 | Run `eas build --platform ios --profile production` |

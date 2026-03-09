@@ -18,7 +18,7 @@ app.use(express.json({ limit: "20mb" }));
 
 /** Optional: use [receipt-ocr](https://github.com/bhimrazy/receipt-ocr) Tesseract service when set. */
 const RECEIPT_OCR_URL = process.env.RECEIPT_OCR_URL || "";
-/** Optional: use OpenAI Vision (gpt-4o) for receipt extraction when set. Often better for mixed language and layout. */
+/** Optional: use OpenAI Vision (gpt-4o-mini) for receipt extraction when set. Often better for mixed language and layout. */
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 /** Local Postgres connection string (example: postgres://user:pass@localhost:5432/receipts_app). */
 const DATABASE_URL = process.env.DATABASE_URL || "";
@@ -504,7 +504,7 @@ async function ocrViaReceiptOcr(imageBuffer) {
 }
 
 /**
- * Optional: extract receipt data using OpenAI Vision (gpt-4o).
+ * Optional: extract receipt data using OpenAI Vision (gpt-4o-mini).
  * Returns same shape as extractReceiptInfo so the app works unchanged.
  */
 async function extractReceiptWithVision(imageBase64) {
@@ -530,7 +530,7 @@ Rules:
       Authorization: `Bearer ${OPENAI_API_KEY}`,
     },
     body: JSON.stringify({
-      model: "gpt-4o",
+      model: "gpt-4o-mini",
       messages: [
         { role: "system", content: "You extract receipt data. Reply with only valid JSON, no other text." },
         {

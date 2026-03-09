@@ -478,7 +478,14 @@ export default function HomeScreen() {
         body: JSON.stringify({ imageBase64: base64 }),
         timeoutMs: 90000,
       });
-      const data = await res.json();
+      const text = await res.text();
+      let data: OcrResponse & { error?: string };
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        if (!res.ok) throw new Error("Server error. The scan service may be starting up—try again in a moment.");
+        throw new Error("Invalid response from scan server. Try again.");
+      }
       if (!res.ok) throw new Error(data?.error || "OCR failed");
       const parsed = data as OcrResponse;
       const extracted = parsed?.extracted ?? {};
