@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Image,
   Modal,
   Pressable,
   ScrollView,
@@ -16,33 +17,54 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "./auth-context";
 import { supabase } from "./lib/supabase";
+import { formatAmount } from "./lib/currency";
 
-type BatchRow = { id: string; name: string; created_at: string; member_count: number };
+function formatBatchDate(dateStr: string | null): string {
+  if (!dateStr) return "";
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr;
+    const now = new Date();
+    const isThisYear = d.getFullYear() === now.getFullYear();
+    return isThisYear
+      ? d.toLocaleDateString(undefined, { month: "short", day: "numeric" })
+      : d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  } catch {
+    return "";
+  }
+}
+
+type BatchRow = { id: string; name: string; created_at: string; host_id: string; member_ids: string[]; profit: number };
 
 export default function BusinessProjectDetailScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ projectId?: string }>();
   const projectId = params.projectId;
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
+  const currencyCode = profile?.default_currency ?? "MYR";
   const [projectName, setProjectName] = useState("");
+  const [isHost, setIsHost] = useState(false);
   const [batches, setBatches] = useState<BatchRow[]>([]);
+  const [avatarMap, setAvatarMap] = useState<Record<string, string | null>>({});
+  const [profileNames, setProfileNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [addBatchModalVisible, setAddBatchModalVisible] = useState(false);
   const [batchName, setBatchName] = useState("");
   const [friends, setFriends] = useState<{ id: string; username: string; display_name?: string | null }[]>([]);
-  const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
+  const [selectedProjectMemberIds, setSelectedProjectMemberIds] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [projectSettingsVisible, setProjectSettingsVisible] = useState(false);
   const [projectEditName, setProjectEditName] = useState("");
   const [deletingProject, setDeletingProject] = useState(false);
+  const [addMembersVisible, setAddMembersVisible] = useState(false);
+  const [leavingProject, setLeavingProject] = useState(false);
 
   const loadProjectAndBatches = useCallback(async () => {
     if (!projectId || !user?.id) return;
     const { data: proj, error: projErr } = await supabase
       .from("business_projects")
-      .select("id, name")
+      .select("id, name, host_id")
       .eq("id", projectId)
-      .eq("host_id", user.id)
       .single();
     if (projErr || !proj) {
       setProjectName("Project");
@@ -50,34 +72,64 @@ export default function BusinessProjectDetailScreen() {
       setLoading(false);
       return;
     }
-    setProjectName((proj as { name: string }).name);
+    const projRow = proj as { id: string; name: string; host_id: string };
+    setProjectName(projRow.name);
+    setIsHost(projRow.host_id === user.id);
+    const { data: memberRows } = await supabase
+      .from("business_project_members")
+      .select("user_id")
+      .eq("project_id", projectId);
+    const projectMemberIds = [projRow.host_id, ...(memberRows ?? []).map((r: { user_id: string }) => r.user_id).filter(Boolean)];
     const { data: batchList, error: batchErr } = await supabase
       .from("business_batches")
-      .select("id, name, created_at")
+      .select("id, name, created_at, host_id")
       .eq("project_id", projectId)
       .order("created_at", { ascending: false });
     if (batchErr) {
       setBatches([]);
+      setAvatarMap({});
+      setProfileNames({});
       setLoading(false);
       return;
     }
-    const list = (batchList ?? []) as { id: string; name: string; created_at: string }[];
+    const list = (batchList ?? []) as { id: string; name: string; created_at: string; host_id: string }[];
     const batchIds = list.map((b) => b.id);
+    const uniqueMemberIds = [...new Set(projectMemberIds)];
+    let avatars: Record<string, string | null> = {};
+    const names: Record<string, string> = {};
+    if (uniqueMemberIds.length > 0) {
+      const { data: profiles } = await supabase.from("profiles").select("id, avatar_url, username, display_name").in("id", uniqueMemberIds);
+      profiles?.forEach((p: { id: string; avatar_url: string | null; username?: string; display_name?: string | null }) => {
+        avatars[p.id] = p.avatar_url ?? null;
+        const name = (p.display_name && p.display_name.trim()) || p.username || "?";
+        names[p.id] = name;
+      });
+    }
+    setAvatarMap(avatars);
+    setProfileNames(names);
     if (batchIds.length === 0) {
-      setBatches(list.map((b) => ({ ...b, member_count: 0 })));
+      setBatches(list.map((b) => ({ ...b, member_ids: uniqueMemberIds, profit: 0 })));
       setLoading(false);
       return;
     }
-    const { data: memberRows } = await supabase
-      .from("business_batch_members")
-      .select("batch_id")
+    const { data: items } = await supabase
+      .from("business_items")
+      .select("batch_id, purchase_price, sold_price, sold_at")
       .in("batch_id", batchIds);
-    const countByBatch: Record<string, number> = {};
-    batchIds.forEach((id) => (countByBatch[id] = 0));
-    (memberRows ?? []).forEach((r: { batch_id: string }) => {
-      countByBatch[r.batch_id] = (countByBatch[r.batch_id] ?? 0) + 1;
+    const profitByBatch: Record<string, number> = {};
+    batchIds.forEach((id) => (profitByBatch[id] = 0));
+    (items ?? []).forEach((row: { batch_id: string; purchase_price: number; sold_price: number | null; sold_at: string | null }) => {
+      if (row.sold_at && row.sold_price != null) {
+        profitByBatch[row.batch_id] = (profitByBatch[row.batch_id] ?? 0) + (Number(row.sold_price) - Number(row.purchase_price));
+      }
     });
-    setBatches(list.map((b) => ({ ...b, member_count: countByBatch[b.id] ?? 0 })));
+    setBatches(
+      list.map((b) => ({
+        ...b,
+        member_ids: uniqueMemberIds,
+        profit: profitByBatch[b.id] ?? 0,
+      }))
+    );
     setLoading(false);
   }, [projectId, user?.id]);
 
@@ -114,19 +166,13 @@ export default function BusinessProjectDetailScreen() {
 
   const openAddBatch = () => {
     setBatchName("");
-    setSelectedMemberIds([]);
     setAddBatchModalVisible(true);
-    loadFriends();
-  };
-
-  const toggleMember = (id: string) => {
-    setSelectedMemberIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
   const handleAddBatch = async () => {
     const name = batchName.trim();
     if (!name || !projectId || !user?.id) {
-      Alert.alert("Required", "Enter a batch name (e.g. March, TCGKL).");
+      Alert.alert("Required", "Enter a batch name.");
       return;
     }
     setSaving(true);
@@ -140,14 +186,60 @@ export default function BusinessProjectDetailScreen() {
       Alert.alert("Error", batchError?.message ?? "Could not create batch.");
       return;
     }
-    if (selectedMemberIds.length > 0) {
-      await supabase.from("business_batch_members").insert(
-        selectedMemberIds.map((user_id) => ({ batch_id: batch.id, user_id }))
-      );
-    }
     setAddBatchModalVisible(false);
     await loadProjectAndBatches();
     router.push({ pathname: "/business-inventory", params: { batchId: batch.id, projectId } });
+  };
+
+  const toggleProjectMember = (id: string) => {
+    setSelectedProjectMemberIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const openAddMembers = () => {
+    setSelectedProjectMemberIds([]);
+    setAddMembersVisible(true);
+    loadFriends();
+  };
+
+  const handleAddProjectMembers = async () => {
+    if (!projectId || !user?.id || selectedProjectMemberIds.length === 0) return;
+    setSaving(true);
+    const { error } = await supabase.from("business_project_members").insert(
+      selectedProjectMemberIds.map((user_id) => ({ project_id: projectId, user_id }))
+    );
+    setSaving(false);
+    if (error) {
+      Alert.alert("Error", error.message);
+      return;
+    }
+    setAddMembersVisible(false);
+    await loadProjectAndBatches();
+  };
+
+  const handleLeaveProject = async () => {
+    if (!projectId || !user?.id) return;
+    Alert.alert("Leave project", "You will no longer see this project or its batches.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Leave",
+        style: "destructive",
+        onPress: async () => {
+          setLeavingProject(true);
+          const { error } = await supabase
+            .from("business_project_members")
+            .delete()
+            .eq("project_id", projectId)
+            .eq("user_id", user.id);
+          setLeavingProject(false);
+          setProjectSettingsVisible(false);
+          if (error) {
+            Alert.alert("Error", error.message);
+            return;
+          }
+          router.replace("/(tabs)/history");
+        },
+      },
+    ]);
   };
 
   const openProjectSettings = () => {
@@ -230,7 +322,7 @@ export default function BusinessProjectDetailScreen() {
             <View style={styles.empty}>
               <Ionicons name="cube-outline" size={48} color="#525252" />
               <Text style={styles.emptyTitle}>No batches yet</Text>
-              <Text style={styles.emptySub}>Tap "Add batch" to create one (e.g. March, TCGKL).</Text>
+              <Text style={styles.emptySub}>Tap "Add batch" to create one.</Text>
             </View>
           ) : (
             batches.map((b) => (
@@ -239,61 +331,88 @@ export default function BusinessProjectDetailScreen() {
                 style={({ pressed }) => [styles.batchCard, pressed && styles.pressed]}
                 onPress={() => router.push({ pathname: "/business-inventory", params: { batchId: b.id, projectId } })}
               >
-                <Text style={styles.batchName}>{b.name}</Text>
-                <Text style={styles.batchMeta}>{b.member_count} member{b.member_count !== 1 ? "s" : ""}</Text>
-                <Ionicons name="chevron-forward" size={20} color="#737373" />
+                <View style={styles.batchCardLeft}>
+                  <Text style={styles.batchName} numberOfLines={1}>{b.name}</Text>
+                  <Text style={styles.batchDate}>{formatBatchDate(b.created_at)}</Text>
+                </View>
+                <View style={styles.batchCardRight}>
+                  <Text style={styles.batchProfit}>{formatAmount(b.profit, currencyCode)}</Text>
+                  <Ionicons name="chevron-forward" size={20} color="#737373" />
+                </View>
               </Pressable>
             ))
           )}
         </ScrollView>
       )}
 
-      <Pressable style={({ pressed }) => [styles.fab, pressed && styles.pressed]} onPress={openAddBatch}>
-        <Ionicons name="add" size={24} color="#0a0a0a" />
-        <Text style={styles.fabText}>Add batch</Text>
-      </Pressable>
+      {isHost && (
+        <Pressable style={({ pressed }) => [styles.fab, pressed && styles.pressed]} onPress={openAddBatch}>
+          <Ionicons name="add" size={24} color="#0a0a0a" />
+          <Text style={styles.fabText}>Add batch</Text>
+        </Pressable>
+      )}
 
       <Modal visible={addBatchModalVisible} transparent animationType="fade">
         <Pressable style={styles.modalBackdrop} onPress={() => setAddBatchModalVisible(false)}>
+          <Pressable style={styles.modalCard} onPress={() => {}}>
+            <Text style={styles.modalTitle}>New batch</Text>
+            <Text style={styles.modalSub}>Name this batch.</Text>
+            <Text style={styles.inputLabel}>Batch name</Text>
+            <TextInput
+              style={styles.input}
+              value={batchName}
+              onChangeText={setBatchName}
+              placeholder="e.g. Batch name"
+              placeholderTextColor="#525252"
+              autoCapitalize="words"
+            />
+            <View style={styles.modalActions}>
+              <Pressable style={[styles.modalBtn, styles.modalBtnCancel]} onPress={() => setAddBatchModalVisible(false)}>
+                <Text style={styles.modalBtnCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable style={[styles.modalBtn, styles.modalBtnSave]} onPress={handleAddBatch} disabled={saving || !batchName.trim()}>
+                <Text style={styles.modalBtnSaveText}>{saving ? "…" : "Create & open"}</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* Add project members modal (host only) */}
+      <Modal visible={addMembersVisible} transparent animationType="fade">
+        <Pressable style={styles.modalBackdrop} onPress={() => setAddMembersVisible(false)}>
           <Pressable style={[styles.modalCard, styles.modalCardWide]} onPress={() => {}}>
             <ScrollView showsVerticalScrollIndicator={false}>
-              <Text style={styles.modalTitle}>New batch</Text>
-              <Text style={styles.modalSub}>Batch name and add members (e.g. March, TCGKL)</Text>
-              <Text style={styles.inputLabel}>Batch name</Text>
-              <TextInput
-                style={styles.input}
-                value={batchName}
-                onChangeText={setBatchName}
-                placeholder="e.g. March, TCGKL"
-                placeholderTextColor="#525252"
-                autoCapitalize="words"
-              />
-              <Text style={styles.inputLabel}>Add members</Text>
+              <Text style={styles.modalTitle}>Add members</Text>
+              <Text style={styles.modalSub}>Added users can view all batches and leave the project.</Text>
               <View style={styles.memberList}>
-                {friends.length === 0 ? (
-                  <Text style={styles.memberEmpty}>No friends yet.</Text>
-                ) : (
-                  friends.map((f) => {
-                    const selected = selectedMemberIds.includes(f.id);
+                {(() => {
+                  const currentIds = batches[0]?.member_ids ?? [];
+                  const addable = friends.filter((f) => !currentIds.includes(f.id));
+                  if (addable.length === 0) {
+                    return <Text style={styles.memberEmpty}>No friends to add, or all are already in the project.</Text>;
+                  }
+                  return addable.map((f) => {
+                    const selected = selectedProjectMemberIds.includes(f.id);
                     return (
                       <Pressable
                         key={f.id}
                         style={[styles.memberRow, selected && styles.memberRowSelected]}
-                        onPress={() => toggleMember(f.id)}
+                        onPress={() => toggleProjectMember(f.id)}
                       >
                         <Text style={styles.memberName}>{(f.display_name && f.display_name.trim()) || f.username}</Text>
                         {selected ? <Ionicons name="checkmark-circle" size={22} color="#8DEB63" /> : <View style={styles.memberCheckEmpty} />}
                       </Pressable>
                     );
-                  })
-                )}
+                  });
+                })()}
               </View>
               <View style={styles.modalActions}>
-                <Pressable style={[styles.modalBtn, styles.modalBtnCancel]} onPress={() => setAddBatchModalVisible(false)}>
+                <Pressable style={[styles.modalBtn, styles.modalBtnCancel]} onPress={() => setAddMembersVisible(false)}>
                   <Text style={styles.modalBtnCancelText}>Cancel</Text>
                 </Pressable>
-                <Pressable style={[styles.modalBtn, styles.modalBtnSave]} onPress={handleAddBatch} disabled={saving || !batchName.trim()}>
-                  <Text style={styles.modalBtnSaveText}>{saving ? "…" : "Create & open"}</Text>
+                <Pressable style={[styles.modalBtn, styles.modalBtnSave]} onPress={handleAddProjectMembers} disabled={saving || selectedProjectMemberIds.length === 0}>
+                  <Text style={styles.modalBtnSaveText}>{saving ? "…" : "Add to project"}</Text>
                 </Pressable>
               </View>
             </ScrollView>
@@ -306,31 +425,44 @@ export default function BusinessProjectDetailScreen() {
         <Pressable style={styles.modalBackdrop} onPress={() => setProjectSettingsVisible(false)}>
           <Pressable style={styles.modalCard} onPress={() => {}}>
             <Text style={styles.modalTitle}>Project settings</Text>
-            <Text style={styles.modalSub}>Rename or delete this project.</Text>
-            <Text style={styles.inputLabel}>Project name</Text>
-            <TextInput
-              style={styles.input}
-              value={projectEditName}
-              onChangeText={setProjectEditName}
-              placeholder="e.g. Pokemon Flips"
-              placeholderTextColor="#525252"
-              autoCapitalize="words"
-            />
-            <View style={styles.modalActions}>
-              <Pressable style={[styles.modalBtn, styles.modalBtnCancel]} onPress={() => setProjectSettingsVisible(false)}>
-                <Text style={styles.modalBtnCancelText}>Cancel</Text>
-              </Pressable>
-              <Pressable style={[styles.modalBtn, styles.modalBtnSave]} onPress={handleRenameProject} disabled={saving || !projectEditName.trim()}>
-                <Text style={styles.modalBtnSaveText}>{saving ? "…" : "Save"}</Text>
-              </Pressable>
-            </View>
-            <Pressable style={styles.deleteProjectBtn} onPress={handleDeleteProject} disabled={deletingProject}>
-              <Ionicons name="trash-outline" size={20} color="#f97373" />
-              <Text style={styles.deleteProjectBtnText}>{deletingProject ? "Deleting…" : "Delete project"}</Text>
-            </Pressable>
-            <Pressable style={[styles.modalBtn, styles.modalBtnCancel, { marginTop: 16 }]} onPress={() => setProjectSettingsVisible(false)}>
-              <Text style={styles.modalBtnCancelText}>Cancel</Text>
-            </Pressable>
+            {isHost ? (
+              <>
+                <Text style={styles.modalSub}>Rename, add members, or delete this project.</Text>
+                <Text style={styles.inputLabel}>Project name</Text>
+                <TextInput
+                  style={styles.input}
+                  value={projectEditName}
+                  onChangeText={setProjectEditName}
+                  placeholder="e.g. Project name"
+                  placeholderTextColor="#525252"
+                  autoCapitalize="words"
+                />
+                <View style={styles.modalActions}>
+                  <Pressable style={[styles.modalBtn, styles.modalBtnCancel]} onPress={() => setProjectSettingsVisible(false)}>
+                    <Text style={styles.modalBtnCancelText}>Cancel</Text>
+                  </Pressable>
+                  <Pressable style={[styles.modalBtn, styles.modalBtnSave]} onPress={handleRenameProject} disabled={saving || !projectEditName.trim()}>
+                    <Text style={styles.modalBtnSaveText}>{saving ? "…" : "Save"}</Text>
+                  </Pressable>
+                </View>
+                <Pressable style={styles.addMembersBtn} onPress={() => { setProjectSettingsVisible(false); openAddMembers(); }}>
+                  <Ionicons name="person-add-outline" size={20} color="#8DEB63" />
+                  <Text style={styles.addMembersBtnText}>Add members to project</Text>
+                </Pressable>
+                <Pressable style={styles.deleteProjectBtn} onPress={handleDeleteProject} disabled={deletingProject}>
+                  <Ionicons name="trash-outline" size={20} color="#f97373" />
+                  <Text style={styles.deleteProjectBtnText}>{deletingProject ? "Deleting…" : "Delete project"}</Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <Text style={styles.modalSub}>You can leave this project. You will no longer see it in history.</Text>
+                <Pressable style={styles.leaveProjectBtn} onPress={handleLeaveProject} disabled={leavingProject}>
+                  <Ionicons name="exit-outline" size={20} color="#f97373" />
+                  <Text style={styles.leaveProjectBtnText}>{leavingProject ? "Leaving…" : "Leave project"}</Text>
+                </Pressable>
+              </>
+            )}
           </Pressable>
         </Pressable>
       </Modal>
@@ -357,6 +489,7 @@ const styles = StyleSheet.create({
   batchCard: {
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "space-between",
     backgroundColor: "#141414",
     borderRadius: 14,
     padding: 16,
@@ -364,8 +497,17 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.06)",
   },
-  batchName: { flex: 1, color: "#fff", fontSize: 16, fontWeight: "700" },
-  batchMeta: { color: "#737373", fontSize: 13, marginRight: 8 },
+  batchCardLeft: { flex: 1, minWidth: 0, marginRight: 12 },
+  batchName: { color: "#fff", fontSize: 16, fontWeight: "700", marginBottom: 2 },
+  batchDate: { color: "#737373", fontSize: 12, marginBottom: 8 },
+  batchAvatars: { flexDirection: "row", alignItems: "center" },
+  batchAvatar: { width: 28, height: 28, borderRadius: 14, overflow: "hidden", backgroundColor: "rgba(255,255,255,0.1)" },
+  batchAvatarOverlap: { marginLeft: -8 },
+  batchAvatarImg: { width: 28, height: 28 },
+  batchAvatarPlaceholder: { width: 28, height: 28, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(141,235,99,0.2)" },
+  batchAvatarLetter: { color: "#8DEB63", fontSize: 12, fontWeight: "700" },
+  batchCardRight: { flexDirection: "row", alignItems: "center", gap: 8 },
+  batchProfit: { color: "#8DEB63", fontSize: 15, fontWeight: "700" },
   fab: {
     position: "absolute",
     bottom: 24,
@@ -419,6 +561,10 @@ const styles = StyleSheet.create({
   modalBtnCancelText: { color: "#e5e5e5", fontSize: 15, fontWeight: "600" },
   modalBtnSave: { backgroundColor: "#8DEB63" },
   modalBtnSaveText: { color: "#0a0a0a", fontSize: 15, fontWeight: "700" },
-  deleteProjectBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 20, paddingVertical: 14, borderWidth: 1, borderColor: "rgba(249,115,115,0.5)", borderRadius: 12 },
+  addMembersBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 16, paddingVertical: 14, borderWidth: 1, borderColor: "rgba(141,235,99,0.4)", borderRadius: 12 },
+  addMembersBtnText: { color: "#8DEB63", fontSize: 15, fontWeight: "700" },
+  deleteProjectBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 12, paddingVertical: 14, borderWidth: 1, borderColor: "rgba(249,115,115,0.5)", borderRadius: 12 },
   deleteProjectBtnText: { color: "#f97373", fontSize: 15, fontWeight: "700" },
+  leaveProjectBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 14, borderWidth: 1, borderColor: "rgba(249,115,115,0.5)", borderRadius: 12 },
+  leaveProjectBtnText: { color: "#f97373", fontSize: 15, fontWeight: "700" },
 });

@@ -23,6 +23,10 @@ type OcrResponse = {
     merchant?: string | null;
     date?: string | null;
     total?: string | null;
+    subtotal?: string | null;
+    tax?: string | null;
+    serviceCharge?: string | null;
+    other_charges?: string | null;
     items?: Array<{ name?: string; qty?: number; price?: string }>;
   };
   source?: "vision" | "ocr";
@@ -496,6 +500,10 @@ export default function HomeScreen() {
           merchant: extracted.merchant ?? "",
           date: extracted.date ?? "",
           total: extracted.total ?? "",
+          tax: extracted.tax ?? "",
+          subtotal: extracted.subtotal ?? "",
+          serviceCharge: extracted.serviceCharge ?? (extracted as { service_charge?: string | null }).service_charge ?? "",
+          otherCharges: extracted.other_charges ?? "",
           source: parsed?.source ?? "ocr",
           imageUri,
           items: JSON.stringify(extracted.items ?? []),

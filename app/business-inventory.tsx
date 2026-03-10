@@ -69,9 +69,27 @@ export default function BusinessInventoryScreen() {
   const [batchSettingsVisible, setBatchSettingsVisible] = useState(false);
   const [batchEditName, setBatchEditName] = useState("");
   const [deletingBatch, setDeletingBatch] = useState(false);
+  const [isHost, setIsHost] = useState(true);
 
   const loadBatches = useCallback(async () => {
     if (!user?.id) return;
+    const batchId = params.batchId;
+    if (batchId) {
+      const { data: batchRow, error } = await supabase
+        .from("business_batches")
+        .select("id, name, created_at, host_id")
+        .eq("id", batchId)
+        .single();
+      if (error || !batchRow) {
+        setBatches([]);
+        return;
+      }
+      const b = batchRow as Batch & { host_id?: string };
+      setIsHost(b.host_id === user.id);
+      setBatches([{ id: b.id, name: b.name, created_at: b.created_at }]);
+      setSelectedBatchId(b.id);
+      return;
+    }
     const { data, error } = await supabase
       .from("business_batches")
       .select("id, name, created_at")
@@ -80,15 +98,29 @@ export default function BusinessInventoryScreen() {
     if (error) return;
     setBatches((data as Batch[]) ?? []);
     if ((data?.length ?? 0) > 0 && !selectedBatchId) setSelectedBatchId((data as Batch[])[0].id);
-  }, [user?.id, selectedBatchId]);
+  }, [user?.id, params.batchId, selectedBatchId]);
 
   const loadItems = useCallback(async () => {
-    const { data: batchRows } = await supabase
-      .from("business_batches")
-      .select("id, name")
-      .eq("host_id", user?.id ?? "");
+    const batchId = params.batchId ?? selectedBatchId;
+    if (batchId) {
+      const { data: batchRow } = await supabase.from("business_batches").select("id, name").eq("id", batchId).single();
+      const batchMap = batchRow ? { [batchId]: (batchRow as { name: string }).name } : {};
+      const { data, error } = await supabase
+        .from("business_items")
+        .select("id, batch_id, item_name, set_name, item_date, remarks, purchase_price, currency, sold_price, sold_at, created_at")
+        .eq("batch_id", batchId)
+        .order("created_at", { ascending: false });
+      if (error) return;
+      const list = ((data ?? []) as Omit<BusinessItem, "batch_name">[]).map((r) => ({
+        ...r,
+        item_date: r.item_date ? String(r.item_date).slice(0, 10) : null,
+        batch_name: batchMap[r.batch_id] ?? "—",
+      }));
+      setItems(list);
+      return;
+    }
+    const { data: batchRows } = await supabase.from("business_batches").select("id, name").eq("host_id", user?.id ?? "");
     const batchMap = Object.fromEntries(((batchRows ?? []) as { id: string; name: string }[]).map((b) => [b.id, b.name]));
-
     const { data, error } = await supabase
       .from("business_items")
       .select("id, batch_id, item_name, set_name, item_date, remarks, purchase_price, currency, sold_price, sold_at, created_at")
@@ -100,7 +132,7 @@ export default function BusinessInventoryScreen() {
       batch_name: batchMap[r.batch_id] ?? "—",
     }));
     setItems(list);
-  }, [user?.id]);
+  }, [user?.id, params.batchId, selectedBatchId]);
 
   useEffect(() => {
     (async () => {
@@ -368,11 +400,13 @@ export default function BusinessInventoryScreen() {
         </Pressable>
         <View style={styles.headerText}>
           <Text style={styles.title}>{currentBatchName}</Text>
-          <Text style={styles.subtitle}>Inventory · Profits · Logs</Text>
+          <Text style={styles.subtitle}>{isHost ? "Inventory · Profits · Logs" : "View only"}</Text>
         </View>
-        <Pressable onPress={openBatchSettings} style={({ pressed }) => [styles.headerIconBtn, pressed && styles.pressed]} hitSlop={8}>
-          <Ionicons name="settings-outline" size={24} color="#a3a3a3" />
-        </Pressable>
+        {isHost && (
+          <Pressable onPress={openBatchSettings} style={({ pressed }) => [styles.headerIconBtn, pressed && styles.pressed]} hitSlop={8}>
+            <Ionicons name="settings-outline" size={24} color="#a3a3a3" />
+          </Pressable>
+        )}
       </View>
 
       <View style={styles.tabs}>
@@ -410,13 +444,15 @@ export default function BusinessInventoryScreen() {
           <>
             <View style={styles.toolbar}>
               <Text style={styles.sectionLabel}>Current inventory ({searchFilteredInventory.length}{searchQuery.trim() ? ` of ${filteredInventory.length}` : ""})</Text>
-              <Pressable
-                style={({ pressed }) => [styles.addBtn, pressed && styles.pressed]}
-  onPress={openAddModal}
-              >
-                <Ionicons name="add" size={20} color="#0a0a0a" />
-                <Text style={styles.addBtnText}>Add item</Text>
-              </Pressable>
+              {isHost && (
+                <Pressable
+                  style={({ pressed }) => [styles.addBtn, pressed && styles.pressed]}
+                  onPress={openAddModal}
+                >
+                  <Ionicons name="add" size={20} color="#0a0a0a" />
+                  <Text style={styles.addBtnText}>Add item</Text>
+                </Pressable>
+              )}
             </View>
             {searchFilteredInventory.length === 0 ? (
               <View style={styles.empty}>
@@ -434,14 +470,16 @@ export default function BusinessInventoryScreen() {
                     {item.remarks ? <Text style={styles.itemRemarks}>{item.remarks}</Text> : null}
                     <Text style={styles.itemPrice}>{formatAmount(item.purchase_price, item.currency)} (cost)</Text>
                   </View>
-                  <View style={styles.itemCardActions}>
-                    <Pressable onPress={() => confirmDeleteItem(item)} style={({ pressed }) => [styles.deleteItemBtn, pressed && styles.pressed]} hitSlop={8}>
-                      <Ionicons name="trash-outline" size={20} color="#f97373" />
-                    </Pressable>
-                    <Pressable style={({ pressed }) => [styles.soldBtn, pressed && styles.pressed]} onPress={() => openSoldModal(item)}>
-                      <Text style={styles.soldBtnText}>SOLD</Text>
-                    </Pressable>
-                  </View>
+                  {isHost && (
+                    <View style={styles.itemCardActions}>
+                      <Pressable onPress={() => confirmDeleteItem(item)} style={({ pressed }) => [styles.deleteItemBtn, pressed && styles.pressed]} hitSlop={8}>
+                        <Ionicons name="trash-outline" size={20} color="#f97373" />
+                      </Pressable>
+                      <Pressable style={({ pressed }) => [styles.soldBtn, pressed && styles.pressed]} onPress={() => openSoldModal(item)}>
+                        <Text style={styles.soldBtnText}>SOLD</Text>
+                      </Pressable>
+                    </View>
+                  )}
                 </View>
               ))
             )}
@@ -499,9 +537,11 @@ export default function BusinessInventoryScreen() {
                         {formatAmount(profitAbs, item.currency)} {profitLabel}
                       </Text>
                     </View>
-                    <Pressable style={({ pressed }) => [styles.editSoldBtn, pressed && styles.pressed]} onPress={() => openEditSoldModal(item)}>
-                      <Ionicons name="pencil" size={18} color="#0a0a0a" />
-                    </Pressable>
+                    {isHost && (
+                      <Pressable style={({ pressed }) => [styles.editSoldBtn, pressed && styles.pressed]} onPress={() => openEditSoldModal(item)}>
+                        <Ionicons name="pencil" size={18} color="#0a0a0a" />
+                      </Pressable>
+                    )}
                   </View>
                 );
               })
@@ -667,7 +707,7 @@ export default function BusinessInventoryScreen() {
               style={styles.input}
               value={batchEditName}
               onChangeText={setBatchEditName}
-              placeholder="e.g. March, TCGKL"
+              placeholder="e.g. Batch name"
               placeholderTextColor="#525252"
             />
             <View style={styles.modalActions}>

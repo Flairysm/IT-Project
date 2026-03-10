@@ -58,7 +58,7 @@ export default function ScanResultScreen() {
   const router = useRouter();
   const { user, profile } = useAuth();
   const currencyCode = profile?.default_currency ?? "MYR";
-  const params = useLocalSearchParams<{ merchant?: string; date?: string; total?: string; source?: string; imageUri?: string; items?: string; receiptId?: string; category?: string }>();
+  const params = useLocalSearchParams<{ merchant?: string; date?: string; total?: string; tax?: string; subtotal?: string; serviceCharge?: string; otherCharges?: string; source?: string; imageUri?: string; items?: string; receiptId?: string; category?: string }>();
   const source = params.source || "ocr";
   const category = (params.category as "restaurant" | "travel" | "groceries" | "business" | "others") || "others";
   const imageUri = params.imageUri;
@@ -82,6 +82,9 @@ export default function ScanResultScreen() {
   const [merchant, setMerchant] = useState(params.merchant || "");
   const [date, setDate] = useState(params.date || "");
   const [total, setTotal] = useState(params.total || "");
+  const [tax, setTax] = useState(params.tax || "");
+  const [serviceCharge, setServiceCharge] = useState(params.serviceCharge || "");
+  const [otherCharges, setOtherCharges] = useState(params.otherCharges || "");
   const [items, setItems] = useState<ResultItem[]>(() => {
     try { return params.items ? (JSON.parse(params.items) as ResultItem[]) : []; } catch { return []; }
   });
@@ -124,7 +127,7 @@ export default function ScanResultScreen() {
     try {
       const { data: rec, error: recErr } = await supabase
         .from("receipts")
-        .select("id, host_id, merchant, receipt_date, total_amount, currency, split_totals")
+        .select("id, host_id, merchant, receipt_date, total_amount, currency, split_totals, tax_amount")
         .eq("id", receiptId)
         .single();
       if (recErr) throw new Error(recErr.message);
@@ -136,6 +139,9 @@ export default function ScanResultScreen() {
       setMerchant(String(rec.merchant ?? "").trim());
       setDate(String(rec.receipt_date ?? "").trim());
       setTotal(String(rec.total_amount ?? "").trim());
+      setTax(String((rec as { tax_amount?: string | null }).tax_amount ?? "").trim());
+      setServiceCharge(String((rec as { service_charge?: string | null }).service_charge ?? "").trim());
+      setOtherCharges(String((rec as { other_charges?: string | null }).other_charges ?? "").trim());
 
       const { data: rows, error: itemsErr } = await supabase
         .from("receipt_items")
@@ -273,30 +279,26 @@ export default function ScanResultScreen() {
 
     const totals = [...baseTotals];
 
-    // For scanned receipts, reconcile to receipt total so tax, discounts, fees are included. For manual, no adjustment — user adds tax as a line item.
-    if (!isManualMode) {
+    // Tax, service charge, and other charges are always split evenly among members.
+    if (!isManualMode && members.length > 0) {
       const itemsSubtotal = items.reduce((sum, item) => sum + (parseFloat(item.price || "0") || 0), 0);
       const effectiveTotal = isRestaurantOrGroceriesManual ? calculatedTotalFromItems : total;
       const receiptTotal = parseFloat(effectiveTotal || "0") || 0;
-      const adjustment = receiptTotal - itemsSubtotal;
-      const assignedBaseSum = baseTotals.reduce((sum, value) => sum + value, 0);
-
-      if (Math.abs(adjustment) > 0.0001 && members.length) {
-        if (assignedBaseSum > 0.0001) {
-          totals.forEach((amount, idx) => {
-            totals[idx] = amount + adjustment * (amount / assignedBaseSum);
-          });
-        } else {
-          const evenShare = adjustment / members.length;
-          totals.forEach((_, idx) => {
-            totals[idx] = evenShare;
-          });
-        }
-      }
+      const taxValue = tax.trim() ? parseFloat(tax) : Math.max(0, receiptTotal - itemsSubtotal);
+      const serviceValue = serviceCharge.trim() ? parseFloat(serviceCharge) : 0;
+      const otherValue = otherCharges.trim() ? parseFloat(otherCharges) : 0;
+      // If no breakdown entered, treat remainder (total - items) as tax for backward compatibility
+      const totalCharges = tax.trim() || serviceCharge.trim() || otherCharges.trim()
+        ? (Number.isFinite(taxValue) && taxValue >= 0 ? taxValue : 0) + (Number.isFinite(serviceValue) && serviceValue >= 0 ? serviceValue : 0) + (Number.isFinite(otherValue) && otherValue >= 0 ? otherValue : 0)
+        : Math.max(0, receiptTotal - itemsSubtotal);
+      const chargesPerPerson = Number.isFinite(totalCharges) && totalCharges >= 0 ? totalCharges / members.length : 0;
+      totals.forEach((_, idx) => {
+        totals[idx] = (totals[idx] ?? 0) + chargesPerPerson;
+      });
     }
 
-    return members.map((m, i) => ({ name: m.username, amount: Math.round(totals[i] * 100) / 100 }));
-  }, [assignments, dynamicPercentages, items, members, total, isRestaurantOrGroceriesManual, calculatedTotalFromItems, isManualMode]);
+    return members.map((m, i) => ({ name: m.username, amount: Math.round((totals[i] ?? 0) * 100) / 100 }));
+  }, [assignments, dynamicPercentages, items, members, total, tax, serviceCharge, otherCharges, isRestaurantOrGroceriesManual, calculatedTotalFromItems, isManualMode]);
 
   const loadFriendsForMember = async () => {
     if (!user?.id) return;
@@ -726,12 +728,20 @@ export default function ScanResultScreen() {
         const paidMembers = currentPaid.filter((n) => newNames.has(n.trim().toLowerCase()));
         const paid = newSplitTotals.length > 0 && newSplitTotals.every((s) => paidMembers.includes(s.name));
 
+        const itemsSubtotal = items.reduce((s, it) => s + (parseFloat(it?.price ?? "0") || 0), 0);
+        const receiptTotalNum = parseFloat(totalAmount || "0") || 0;
+        const taxToSave = tax.trim() ? tax.trim() : (receiptTotalNum - itemsSubtotal > 0 ? (receiptTotalNum - itemsSubtotal).toFixed(2) : null);
+        const serviceChargeToSave = serviceCharge.trim() ? serviceCharge.trim() : null;
+        const otherChargesToSave = otherCharges.trim() ? otherCharges.trim() : null;
         const { error: updateErr } = await supabase
           .from("receipts")
           .update({
             merchant: (merchant || "").trim() || null,
             receipt_date: receiptDateValue,
             total_amount: totalAmount,
+            tax_amount: taxToSave,
+            service_charge: serviceChargeToSave,
+            other_charges: otherChargesToSave,
             currency: currencyCode || "MYR",
             split_totals: newSplitTotals,
             paid_members: paidMembers,
@@ -766,6 +776,11 @@ export default function ScanResultScreen() {
       } else {
         const hostUsername = (profile?.username ?? "").trim();
         const initialPaidMembers = hostUsername ? [hostUsername] : [];
+        const itemsSubtotalNew = items.reduce((s, it) => s + (parseFloat(it?.price ?? "0") || 0), 0);
+        const receiptTotalNumNew = parseFloat(totalAmount || "0") || 0;
+        const taxToSaveNew = tax.trim() ? tax.trim() : (receiptTotalNumNew - itemsSubtotalNew > 0 ? (receiptTotalNumNew - itemsSubtotalNew).toFixed(2) : null);
+        const serviceChargeToSaveNew = serviceCharge.trim() ? serviceCharge.trim() : null;
+        const otherChargesToSaveNew = otherCharges.trim() ? otherCharges.trim() : null;
         const { data: receiptRow, error: receiptError } = await supabase
           .from("receipts")
           .insert({
@@ -773,6 +788,9 @@ export default function ScanResultScreen() {
             merchant: (merchant || "").trim() || null,
             receipt_date: receiptDateValue,
             total_amount: totalAmount,
+            tax_amount: taxToSaveNew,
+            service_charge: serviceChargeToSaveNew,
+            other_charges: otherChargesToSaveNew,
             currency: currencyCode || "MYR",
             source: source as "vision" | "ocr" | "manual",
             split_totals: newSplitTotals,
@@ -1070,6 +1088,89 @@ export default function ScanResultScreen() {
                   ) : null}
                 </View>
               ))}
+              {!isManualMode ? (
+                (() => {
+                  const itemsSubtotal = items.reduce((s, it) => s + (parseFloat(it?.price ?? "0") || 0), 0);
+                  const receiptTotal = parseFloat((total || "0").trim()) || 0;
+                  const remainder = Math.max(0, receiptTotal - itemsSubtotal);
+                  const taxVal = tax.trim() ? parseFloat(tax) : (Number.isFinite(remainder) ? remainder : 0);
+                  const taxDisplay = Number.isFinite(taxVal) && taxVal >= 0 ? taxVal : 0;
+                  const serviceVal = serviceCharge.trim() ? parseFloat(serviceCharge) : 0;
+                  const serviceDisplay = Number.isFinite(serviceVal) && serviceVal >= 0 ? serviceVal : 0;
+                  const otherVal = otherCharges.trim() ? parseFloat(otherCharges) : 0;
+                  const otherDisplay = Number.isFinite(otherVal) && otherVal >= 0 ? otherVal : 0;
+                  return (
+                    <>
+                      <View style={[styles.itemCard, styles.taxItemCard]}>
+                        <View style={styles.itemRow}>
+                          <View style={styles.itemLeft}>
+                            <Text style={styles.itemName}>Tax</Text>
+                            <Text style={styles.taxItemMeta}>Split equally among all</Text>
+                          </View>
+                          <View style={styles.itemPriceRow}>
+                            {editItemsMode ? (
+                              <TextInput
+                                style={styles.itemPriceInput}
+                                value={tax}
+                                onChangeText={setTax}
+                                placeholder="0.00"
+                                placeholderTextColor="#525252"
+                                keyboardType="decimal-pad"
+                              />
+                            ) : (
+                              <Text style={styles.itemPrice}>{formatAmount(taxDisplay, currencyCode)}</Text>
+                            )}
+                          </View>
+                        </View>
+                      </View>
+                      <View style={[styles.itemCard, styles.taxItemCard]}>
+                        <View style={styles.itemRow}>
+                          <View style={styles.itemLeft}>
+                            <Text style={styles.itemName}>Service tax</Text>
+                            <Text style={styles.taxItemMeta}>Split equally among all</Text>
+                          </View>
+                          <View style={styles.itemPriceRow}>
+                            {editItemsMode ? (
+                              <TextInput
+                                style={styles.itemPriceInput}
+                                value={serviceCharge}
+                                onChangeText={setServiceCharge}
+                                placeholder="0.00"
+                                placeholderTextColor="#525252"
+                                keyboardType="decimal-pad"
+                              />
+                            ) : (
+                              <Text style={styles.itemPrice}>{formatAmount(serviceDisplay, currencyCode)}</Text>
+                            )}
+                          </View>
+                        </View>
+                      </View>
+                      <View style={[styles.itemCard, styles.taxItemCard]}>
+                        <View style={styles.itemRow}>
+                          <View style={styles.itemLeft}>
+                            <Text style={styles.itemName}>Other charges</Text>
+                            <Text style={styles.taxItemMeta}>Split equally among all</Text>
+                          </View>
+                          <View style={styles.itemPriceRow}>
+                            {editItemsMode ? (
+                              <TextInput
+                                style={styles.itemPriceInput}
+                                value={otherCharges}
+                                onChangeText={setOtherCharges}
+                                placeholder="0.00"
+                                placeholderTextColor="#525252"
+                                keyboardType="decimal-pad"
+                              />
+                            ) : (
+                              <Text style={styles.itemPrice}>{formatAmount(otherDisplay, currencyCode)}</Text>
+                            )}
+                          </View>
+                        </View>
+                      </View>
+                    </>
+                  );
+                })()
+              ) : null}
               {editItemsMode ? (
                 <Pressable onPress={addItem} style={({ pressed }) => [styles.addItemBtn, pressed && styles.pressed]}>
                   <Ionicons name="add-circle-outline" size={20} color="#8DEB63" />
@@ -1419,6 +1520,8 @@ const styles = StyleSheet.create({
     borderBottomColor: "rgba(255,255,255,0.06)",
   },
   itemCardLast: { borderBottomWidth: 0 },
+  taxItemCard: { backgroundColor: "rgba(255,255,255,0.03)" },
+  taxItemMeta: { color: "#737373", fontSize: 12, marginTop: 4 },
   itemRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   itemLeft: { flex: 1, minWidth: 0, paddingRight: 16 },
   itemName: { color: "#e5e5e5", fontSize: 16, fontWeight: "500", lineHeight: 22 },

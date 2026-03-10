@@ -35,7 +35,7 @@ type ExpenseGroupRow = { id: string; name: string; category: string; created_at:
 type HistoryFilter = "all" | "paid" | "unpaid";
 type HistoryCategoryTab = "all" | "restaurant" | "travel" | "groceries" | "business" | "others";
 
-type BusinessProjectRow = { id: string; name: string; created_at: string; batch_count: number };
+type BusinessProjectRow = { id: string; name: string; created_at: string; batch_count: number; host_id?: string };
 type HistoryListItem =
   | { type: "receipt"; id: string; title: string; date: string; category: string; meta: string; amountLabel: string; row: HistoryRow }
   | { type: "trip"; id: string; title: string; date: string; category: string; meta: string; amountLabel: string; group: ExpenseGroupRow }
@@ -87,6 +87,7 @@ export default function HistoryTabScreen() {
   const [categoryTab, setCategoryTab] = useState<HistoryCategoryTab>("all");
   const [historyHostProfiles, setHistoryHostProfiles] = useState<Record<string, { username: string; avatar_url: string | null }>>({});
   const [historyReceiptAvatarMap, setHistoryReceiptAvatarMap] = useState<Record<string, string | null>>({});
+  const [businessProjectHostProfiles, setBusinessProjectHostProfiles] = useState<Record<string, { username: string; display_name?: string | null; avatar_url: string | null }>>({});
 
   const loadExpenseGroups = useCallback(async () => {
     if (!user?.id) {
@@ -164,15 +165,25 @@ export default function HistoryTabScreen() {
     try {
       const { data: projects, error } = await supabase
         .from("business_projects")
-        .select("id, name, created_at")
-        .eq("host_id", user.id)
+        .select("id, name, created_at, host_id")
         .order("created_at", { ascending: false });
       if (error) {
         setBusinessProjects([]);
         return;
       }
-      const projectList = (projects ?? []) as { id: string; name: string; created_at: string }[];
+      const projectList = (projects ?? []) as { id: string; name: string; created_at: string; host_id?: string }[];
       const projectIds = projectList.map((p) => p.id);
+      const hostIds = [...new Set(projectList.map((p) => p.host_id).filter(Boolean))] as string[];
+      if (hostIds.length > 0) {
+        const { data: hostProfs } = await supabase.from("profiles").select("id, username, display_name, avatar_url").in("id", hostIds);
+        const map: Record<string, { username: string; display_name?: string | null; avatar_url: string | null }> = {};
+        (hostProfs ?? []).forEach((p: { id: string; username: string; display_name?: string | null; avatar_url: string | null }) => {
+          map[p.id] = { username: p.username ?? "", display_name: p.display_name ?? null, avatar_url: p.avatar_url ?? null };
+        });
+        setBusinessProjectHostProfiles(map);
+      } else {
+        setBusinessProjectHostProfiles({});
+      }
       if (projectIds.length === 0) {
         setBusinessProjects(projectList.map((p) => ({ ...p, batch_count: 0 })));
         return;
@@ -479,7 +490,7 @@ export default function HistoryTabScreen() {
                 const createdByName = item.type === "receipt"
                   ? (profile?.display_name?.trim() || profile?.username || "You")
                   : item.type === "project"
-                    ? (profile?.display_name?.trim() || profile?.username || "You")
+                    ? (item.project.host_id ? (businessProjectHostProfiles[item.project.host_id]?.display_name?.trim() || businessProjectHostProfiles[item.project.host_id]?.username) ?? "—" : "—")
                     : (item.group.host_id ? historyHostProfiles[item.group.host_id]?.username ?? "—" : "—");
                 const avatarKeysReceipt = item.type === "receipt"
                   ? [...new Set([profile?.username, ...(item.row.split_totals ?? []).map((s) => s?.name).filter(Boolean)] as string[])]
@@ -487,7 +498,8 @@ export default function HistoryTabScreen() {
                 const avatarIdsTrip = item.type === "trip"
                   ? [...new Set([item.group.host_id, ...(item.group.member_ids ?? [])].filter(Boolean) as string[])]
                   : [];
-                const avatarCount = item.type === "receipt" ? avatarKeysReceipt.length : item.type === "trip" ? avatarIdsTrip.length : 0;
+                const avatarIdsProject = item.type === "project" && item.project.host_id ? [item.project.host_id] : [];
+                const avatarCount = item.type === "receipt" ? avatarKeysReceipt.length : item.type === "trip" ? avatarIdsTrip.length : item.type === "project" ? avatarIdsProject.length : 0;
                 return (
                   <Pressable
                     key={item.type === "receipt" ? `r-${item.id}` : item.type === "project" ? `p-${item.id}` : `t-${item.id}`}
@@ -547,7 +559,24 @@ export default function HistoryTabScreen() {
                                   </View>
                                 );
                               })
-                            : null}
+                            : item.type === "project"
+                              ? avatarIdsProject.slice(0, 7).map((uid, i) => {
+                                  const prof = uid ? businessProjectHostProfiles[uid] : null;
+                                  const url = prof?.avatar_url ?? null;
+                                  const initial = memberInitial(prof?.username ?? "?");
+                                  return (
+                                    <View key={`${item.id}-${uid}-${i}`} style={[styles.historyAvatar, { marginLeft: i === 0 ? 0 : -6 }]}>
+                                      {url ? (
+                                        <Image source={{ uri: url }} style={styles.historyAvatarImg} />
+                                      ) : (
+                                        <View style={styles.historyAvatarPlaceholder}>
+                                          <Text style={styles.historyAvatarText}>{initial}</Text>
+                                        </View>
+                                      )}
+                                    </View>
+                                  );
+                                })
+                              : null}
                         {avatarCount > 7 ? (
                           <View style={[styles.historyAvatarMore, { marginLeft: -6 }]}>
                             <Text style={styles.historyAvatarMoreText}>+{avatarCount - 7}</Text>

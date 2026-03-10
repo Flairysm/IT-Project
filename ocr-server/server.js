@@ -338,6 +338,8 @@ function extractReceiptInfo(text) {
     total: null,
     subtotal: null,
     tax: null,
+    serviceCharge: null,
+    other_charges: null,
     date: null,
     merchant: null,
     items: [],
@@ -350,7 +352,7 @@ function extractReceiptInfo(text) {
   const totalRegex = /^total\s*:?\s*\$?\s*([\d,]+\.?\d*)/im;
   const taxRegex = /(?:tax|gst|hst|vat|sst)\s*:?\s*(?:\d+%?\s*)?\$?\s*([\d,]+\.?\d*)/i;
   const subtotalRegex = /sub\s*total\s*:?\s*\$?\s*([\d,]+\.?\d*)/i;
-  const serviceChargeRegex = /service\s+charge\s*(?:\d+%)?\s*:?\s*\$?\s*([\d,]+\.?\d*)/i;
+  const serviceChargeRegex = /service\s+charge\s*(?:\d+%)?\s*:?\s*(?:RM\s*|\$)?\s*([\d,]+\.?\d*)/i;
   const sstRegex = /sst\s*(?:\d+%)?\s*:?\s*\$?\s*([\d,]+\.?\d*)/i;
   const dateRegex = /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})|(\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2})/;
 
@@ -397,6 +399,11 @@ function extractReceiptInfo(text) {
       expectedTotal: expectedRounded,
       match,
     };
+  }
+  if (serviceChargeVal != null) extracted.serviceCharge = String(serviceChargeVal);
+  if (totalVal != null) {
+    const other = totalVal - (subtotalVal || 0) - (sstVal || 0) - (serviceChargeVal || 0);
+    if (Number.isFinite(other) && other >= -0.02) extracted.other_charges = String(Math.round(Math.max(0, other) * 100) / 100);
   }
 
   // Item block: find keywords "Item", "Qty", "Subt" for start; "Subtotal", "Service charge", "SST", "Total" for end
@@ -524,10 +531,12 @@ async function extractReceiptWithVision(imageBase64, modelId) {
   "sst": "10.26",
   "total": "198.36"
 }
+CRITICAL - Service charge: Look for any line that is the service charge (e.g. "Service Charge", "Service charge", "10% Service Charge", "Service Tax"). Put the numeric amount as a string in "serviceCharge" (e.g. "17.10"). If the receipt has Subtotal + Service Charge + SST = Total, extract the service charge value. Never use 0 or null for serviceCharge if the receipt clearly shows a service charge amount.
 Rules:
 - items: only line items (food/products). NOT subtotal, service charge, SST, total, payment method, or footer text.
 - price: string with 2 decimals (e.g. "59.00").
 - If a field is not found, use null. For numbers use string (e.g. "198.36").
+- serviceCharge: REQUIRED when the receipt shows a service charge line. Use the exact amount (e.g. "17.10"). Only use null if there is no service charge line at all.
 - Prefer English for item names; if the receipt has Chinese, use the English part or a short English label.`;
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -559,9 +568,18 @@ Rules:
   const parsed = JSON.parse(json);
 
   const subtotal = parsed.subtotal != null ? parseFloat(String(parsed.subtotal)) : null;
-  const serviceCharge = parsed.serviceCharge != null ? parseFloat(String(parsed.serviceCharge)) : null;
   const sst = parsed.sst != null ? parseFloat(String(parsed.sst)) : null;
   const total = parsed.total != null ? parseFloat(String(parsed.total)) : null;
+  let serviceChargeRaw = parsed.serviceCharge ?? parsed.service_charge;
+  let serviceCharge = serviceChargeRaw != null && String(serviceChargeRaw).trim() !== "" ? parseFloat(String(serviceChargeRaw)) : null;
+  // Fallback: if AI missed service charge but we have total, subtotal and tax, derive it (total = subtotal + serviceCharge + sst)
+  if ((serviceCharge == null || serviceCharge === 0) && total != null && subtotal != null && sst != null) {
+    const derived = Math.round((total - subtotal - sst) * 100) / 100;
+    if (derived >= 0 && derived < 100000) {
+      serviceCharge = derived;
+      serviceChargeRaw = String(derived);
+    }
+  }
   const expectedTotal = [subtotal, serviceCharge, sst].every((n) => n != null) ? Math.round((subtotal + serviceCharge + sst) * 100) / 100 : null;
   const match = total != null && expectedTotal != null && Math.abs(total - expectedTotal) < 0.02;
 
@@ -571,12 +589,20 @@ Rules:
     price: typeof i.price === "string" ? i.price : (i.price != null ? String(Number(i.price).toFixed(2)) : "0.00"),
   })) : [];
   const sumItemQty = items.reduce((s, i) => s + (i.qty || 0), 0);
+  const serviceChargeStr = (serviceChargeRaw != null && String(serviceChargeRaw).trim() !== "") ? String(serviceChargeRaw).replace(/^(\d+\.?\d*).*/, "$1") : (serviceCharge != null && serviceCharge >= 0 ? String(serviceCharge) : null);
+  const taxNum = sst != null ? sst : (parsed.tax != null ? parseFloat(String(parsed.tax)) : null);
+  const otherNum = total != null && (subtotal != null || taxNum != null || serviceCharge != null)
+    ? Math.round((total - (subtotal || 0) - (taxNum || 0) - (serviceCharge || 0)) * 100) / 100
+    : null;
+  const other_chargesStr = (otherNum != null && otherNum >= -0.02) ? String(Math.max(0, otherNum)) : null;
 
   return {
     rawLines: [],
     total: parsed.total != null ? String(parsed.total).replace(/^(\d+\.?\d*).*/, "$1") : null,
     subtotal: parsed.subtotal != null ? String(parsed.subtotal) : null,
     tax: parsed.sst != null ? String(parsed.sst) : parsed.tax || null,
+    serviceCharge: serviceChargeStr,
+    other_charges: other_chargesStr,
     date: parsed.date != null ? String(parsed.date) : null,
     merchant: parsed.merchant != null ? String(parsed.merchant).trim() : null,
     items,

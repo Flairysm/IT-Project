@@ -38,12 +38,15 @@ function splitInitial(username: string): string {
 type SplitProfile = { display_name?: string | null; avatar_url?: string | null };
 
 type SplitTotal = { name: string; amount: number };
+type ReceiptItemRow = { id: string; name: string; qty: number; unit_price: string; total_price: string };
+type AssignmentRow = { item_id: string; user_id: string; share_amount: number };
 type ReceiptDetail = {
   id: string;
   host_id: string | null;
   merchant: string | null;
   date: string | null;
   total: string | null;
+  tax_amount: string | null;
   paid: boolean;
   amount_due: string;
   paid_members: string[];
@@ -66,6 +69,10 @@ export default function HistoryDetailScreen() {
   const [imageFullVisible, setImageFullVisible] = useState(false);
   const [proofImageUrl, setProofImageUrl] = useState<string | null>(null);
   const [splitProfiles, setSplitProfiles] = useState<Record<string, SplitProfile>>({});
+  const [receiptItems, setReceiptItems] = useState<ReceiptItemRow[]>([]);
+  const [assignments, setAssignments] = useState<AssignmentRow[]>([]);
+  const [assignmentProfiles, setAssignmentProfiles] = useState<Record<string, { display_name?: string | null; username?: string }>>({});
+  const [summaryModalVisible, setSummaryModalVisible] = useState(false);
   const [proofUploading, setProofUploading] = useState(false);
   const [markSelfPaidLoading, setMarkSelfPaidLoading] = useState(false);
 
@@ -76,7 +83,7 @@ export default function HistoryDetailScreen() {
     try {
       const { data: row, error } = await supabase
         .from("receipts")
-        .select("id, host_id, merchant, receipt_date, total_amount, paid, split_totals, paid_members, image_url, proof_required")
+        .select("id, host_id, merchant, receipt_date, total_amount, tax_amount, service_charge, other_charges, paid, split_totals, paid_members, image_url, proof_required")
         .eq("id", id)
         .single();
       if (error) throw new Error(error.message);
@@ -115,6 +122,9 @@ export default function HistoryDetailScreen() {
         merchant: row.merchant ?? null,
         date: row.receipt_date ?? null,
         total: row.total_amount ?? null,
+        tax_amount: (row as { tax_amount?: string | null }).tax_amount ?? null,
+        service_charge: (row as { service_charge?: string | null }).service_charge ?? null,
+        other_charges: (row as { other_charges?: string | null }).other_charges ?? null,
         paid: Boolean(row.paid),
         amount_due: amountDue,
         paid_members: paidMembers,
@@ -123,6 +133,36 @@ export default function HistoryDetailScreen() {
         proof_required: row.proof_required !== false,
         proofsByUsername,
       });
+      const { data: itemsRows } = await supabase
+        .from("receipt_items")
+        .select("id, name, qty, unit_price, total_price")
+        .eq("receipt_id", id)
+        .order("created_at", { ascending: true });
+      const items = (itemsRows ?? []).map((r: { id: string; name: string; qty: number; unit_price: string; total_price: string }) => ({
+        id: String(r.id),
+        name: r.name ?? "",
+        qty: Number(r.qty) || 1,
+        unit_price: String(r.unit_price ?? "0"),
+        total_price: String(r.total_price ?? "0"),
+      }));
+      setReceiptItems(items);
+      const { data: assignRows } = await supabase
+        .from("receipt_assignments")
+        .select("item_id, user_id, share_amount")
+        .eq("receipt_id", id);
+      const assignList = (assignRows ?? []) as AssignmentRow[];
+      setAssignments(assignList);
+      const assignUserIds = [...new Set(assignList.map((a) => a.user_id))];
+      if (assignUserIds.length > 0) {
+        const { data: assignProfs } = await supabase.from("profiles").select("id, display_name, username").in("id", assignUserIds);
+        const map: Record<string, { display_name?: string | null; username?: string }> = {};
+        (assignProfs ?? []).forEach((p: { id: string; display_name?: string | null; username?: string }) => {
+          map[p.id] = { display_name: p.display_name ?? null, username: p.username ?? "" };
+        });
+        setAssignmentProfiles(map);
+      } else {
+        setAssignmentProfiles({});
+      }
       const usernames = splitTotals.map((s: { name?: string }) => String(s?.name ?? "").trim()).filter(Boolean);
       if (usernames.length > 0) {
         const { data: profiles } = await supabase
@@ -529,7 +569,191 @@ export default function HistoryDetailScreen() {
               <Text style={styles.amountDueValue}>{formatAmount(receipt.amount_due, currencyCode)}</Text>
             </View>
           ) : null}
+
+          <Pressable
+            style={({ pressed }) => [styles.viewSummaryBtn, pressed && styles.btnPressed]}
+            onPress={() => setSummaryModalVisible(true)}
+          >
+            <Ionicons name="document-text-outline" size={20} color="#0a0a0a" />
+            <Text style={styles.viewSummaryBtnText}>View summary</Text>
+            <Ionicons name="chevron-forward" size={18} color="#0a0a0a" />
+          </Pressable>
         </ScrollView>
+
+        {/* Detailed summary modal */}
+        <Modal visible={summaryModalVisible} transparent animationType="slide">
+          <Pressable style={styles.summaryModalBackdrop} onPress={() => setSummaryModalVisible(false)}>
+            <Pressable style={styles.summaryModalCard} onPress={() => {}}>
+              <View style={styles.summaryModalHeader}>
+                <Text style={styles.summaryModalTitle}>Receipt summary</Text>
+                <Text style={styles.summaryModalSubtitle}>Detailed breakdown</Text>
+                <Pressable onPress={() => setSummaryModalVisible(false)} style={styles.summaryModalClose} hitSlop={12}>
+                  <Ionicons name="close" size={24} color="#737373" />
+                </Pressable>
+              </View>
+              <ScrollView style={styles.summaryModalScroll} showsVerticalScrollIndicator={false}>
+                {receiptItems.length > 0 ? (
+                  <>
+                    <Text style={styles.summarySectionTitle}>Item breakdown</Text>
+                    {receiptItems.map((item) => {
+                      const itemTotal = parseFloat(item.total_price) || 0;
+                      const itemAssignments = assignments.filter((a) => a.item_id === item.id);
+                      return (
+                        <View key={item.id} style={styles.summaryDetailItem}>
+                          <View style={styles.summaryDetailItemHead}>
+                            <Text style={styles.summaryDetailItemName}>{item.name}</Text>
+                            <Text style={styles.summaryDetailItemTotal}>{formatAmount(itemTotal, currencyCode)}</Text>
+                          </View>
+                          {item.qty > 1 ? (
+                            <Text style={styles.summaryDetailItemMeta}>
+                              {item.qty} × {formatAmount(parseFloat(item.unit_price), currencyCode)}
+                            </Text>
+                          ) : null}
+                          {itemAssignments.length > 0 ? (
+                            <View style={styles.summaryDetailWhoPaid}>
+                              {itemAssignments.map((a) => {
+                                const prof = assignmentProfiles[a.user_id];
+                                const name = (prof?.display_name && prof.display_name.trim()) || prof?.username || "—";
+                                return (
+                                  <Text key={`${a.item_id}-${a.user_id}`} style={styles.summaryDetailWhoPaidRow}>
+                                    {name}: {formatAmount(Number(a.share_amount), currencyCode)}
+                                  </Text>
+                                );
+                              })}
+                            </View>
+                          ) : null}
+                        </View>
+                      );
+                    })}
+                    {(() => {
+                      const subtotal = receiptItems.reduce((s, i) => s + (parseFloat(i.total_price) || 0), 0);
+                      const total = parseFloat(receipt.total || "0") || 0;
+                      const storedTax = receipt.tax_amount != null && receipt.tax_amount.trim() !== "" ? parseFloat(receipt.tax_amount) : null;
+                      const taxAmount = Number.isFinite(storedTax) && storedTax >= 0 ? storedTax : Math.round((total - subtotal) * 100) / 100;
+                      const showTax = (Number.isFinite(storedTax) && storedTax >= 0) || Math.abs(taxAmount) > 0.001;
+                      return showTax ? (
+                        <View style={styles.summaryDetailItem}>
+                          <View style={styles.summaryDetailItemHead}>
+                            <Text style={styles.summaryDetailItemName}>Tax</Text>
+                            <Text style={styles.summaryDetailItemTotal}>{formatAmount(taxAmount, currencyCode)}</Text>
+                          </View>
+                          <Text style={styles.summaryDetailItemMeta}>Split evenly among members</Text>
+                        </View>
+                      ) : null;
+                    })()}
+                    {(() => {
+                      const sc = receipt.service_charge != null && receipt.service_charge.trim() !== "" ? parseFloat(receipt.service_charge) : null;
+                      const serviceAmount = Number.isFinite(sc) && sc >= 0 ? sc : 0;
+                      const showService = (Number.isFinite(sc) && sc >= 0) || Math.abs(serviceAmount) > 0.001;
+                      return showService ? (
+                        <View style={styles.summaryDetailItem}>
+                          <View style={styles.summaryDetailItemHead}>
+                            <Text style={styles.summaryDetailItemName}>Service tax</Text>
+                            <Text style={styles.summaryDetailItemTotal}>{formatAmount(serviceAmount, currencyCode)}</Text>
+                          </View>
+                          <Text style={styles.summaryDetailItemMeta}>Split evenly among members</Text>
+                        </View>
+                      ) : null;
+                    })()}
+                    {(() => {
+                      const oc = receipt.other_charges != null && receipt.other_charges.trim() !== "" ? parseFloat(receipt.other_charges) : null;
+                      const otherAmount = Number.isFinite(oc) && oc >= 0 ? oc : 0;
+                      const showOther = (Number.isFinite(oc) && oc >= 0) || Math.abs(otherAmount) > 0.001;
+                      return showOther ? (
+                        <View style={styles.summaryDetailItem}>
+                          <View style={styles.summaryDetailItemHead}>
+                            <Text style={styles.summaryDetailItemName}>Other charges</Text>
+                            <Text style={styles.summaryDetailItemTotal}>{formatAmount(otherAmount, currencyCode)}</Text>
+                          </View>
+                          <Text style={styles.summaryDetailItemMeta}>Split evenly among members</Text>
+                        </View>
+                      ) : null;
+                    })()}
+                    <View style={styles.summaryDivider} />
+                    {(() => {
+                      const subtotal = receiptItems.reduce((s, i) => s + (parseFloat(i.total_price) || 0), 0);
+                      const total = parseFloat(receipt.total || "0") || 0;
+                      return (
+                        <>
+                          <View style={styles.summaryDetailRow}>
+                            <Text style={styles.summaryDetailLabel}>Subtotal (items)</Text>
+                            <Text style={styles.summaryDetailValue}>{formatAmount(subtotal, currencyCode)}</Text>
+                          </View>
+                          <View style={styles.summaryDetailRow}>
+                            <Text style={styles.summaryDetailLabelBold}>Receipt total</Text>
+                            <Text style={styles.summaryDetailValueBold}>{formatAmount(total, currencyCode)}</Text>
+                          </View>
+                        </>
+                      );
+                    })()}
+                    <View style={styles.summaryDivider} />
+                    {receipt.split_totals?.length ? (
+                      <>
+                        <Text style={styles.summarySectionTitle}>Who owes what</Text>
+                        {receipt.split_totals.map((row) => {
+                          const rowPaid = receipt.paid_members?.includes(row.name);
+                          const prof = splitProfiles[row.name.trim().toLowerCase()];
+                          const displayName = (prof?.display_name ?? "").trim() || row.name;
+                          return (
+                            <View key={row.name} style={styles.summaryDetailRow}>
+                              <View>
+                                <Text style={styles.summaryDetailLabel}>{displayName}</Text>
+                                <Text style={styles.summaryDetailMeta}>@{row.name} · {rowPaid ? "Paid" : "Unpaid"}</Text>
+                              </View>
+                              <Text style={[styles.summaryDetailValue, rowPaid ? styles.summaryStatusPaid : styles.summaryStatusUnpaid]}>
+                                {formatAmount(Number(row.amount || 0), currencyCode)}
+                              </Text>
+                            </View>
+                          );
+                        })}
+                        <View style={styles.summaryDivider} />
+                      </>
+                    ) : null}
+                    <View style={styles.summaryDetailRow}>
+                      <Text style={styles.summaryDetailLabelBold}>Amount still due</Text>
+                      <Text style={styles.summaryDueValueBold}>{formatAmount(receipt.amount_due, currencyCode)}</Text>
+                    </View>
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.summaryEmpty}>No line items on this receipt.</Text>
+                    <View style={styles.summaryDetailRow}>
+                      <Text style={styles.summaryDetailLabelBold}>Receipt total</Text>
+                      <Text style={styles.summaryDetailValueBold}>{formatAmount(parseFloat(receipt.total || "0"), currencyCode)}</Text>
+                    </View>
+                    {receipt.split_totals?.length ? (
+                      <>
+                        <View style={styles.summaryDivider} />
+                        <Text style={styles.summarySectionTitle}>Who owes what</Text>
+                        {receipt.split_totals.map((row) => {
+                          const rowPaid = receipt.paid_members?.includes(row.name);
+                          const prof = splitProfiles[row.name.trim().toLowerCase()];
+                          const displayName = (prof?.display_name ?? "").trim() || row.name;
+                          return (
+                            <View key={row.name} style={styles.summaryDetailRow}>
+                              <View>
+                                <Text style={styles.summaryDetailLabel}>{displayName}</Text>
+                                <Text style={styles.summaryDetailMeta}>@{row.name} · {rowPaid ? "Paid" : "Unpaid"}</Text>
+                              </View>
+                              <Text style={[styles.summaryDetailValue, rowPaid ? styles.summaryStatusPaid : styles.summaryStatusUnpaid]}>
+                                {formatAmount(Number(row.amount || 0), currencyCode)}
+                              </Text>
+                            </View>
+                          );
+                        })}
+                      </>
+                    ) : null}
+                    <View style={styles.summaryDivider} />
+                    <View style={styles.summaryDetailRow}>
+                      <Text style={styles.summaryDetailLabelBold}>Amount still due</Text>
+                      <Text style={styles.summaryDueValueBold}>{formatAmount(receipt.amount_due, currencyCode)}</Text>
+                    </View>
+                  </>
+                )}
+              </ScrollView>
+            </Pressable>
+          </Pressable>
+        </Modal>
 
         <Modal
           visible={imageFullVisible || !!proofImageUrl}
@@ -885,6 +1109,125 @@ const styles = StyleSheet.create({
   },
   amountDueLabel: { color: "#a3a3a3", fontSize: 12, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 },
   amountDueValue: { color: "#fbbf24", fontSize: 28, fontWeight: "800" },
+
+  summaryCard: {
+    marginTop: 24,
+    borderRadius: 16,
+    backgroundColor: "#141414",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    padding: 20,
+  },
+  summaryTitle: { color: "#fff", fontSize: 18, fontWeight: "800", marginBottom: 4 },
+  summarySubtitle: { color: "#737373", fontSize: 13, marginBottom: 16 },
+  summaryTotalRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 8,
+  },
+  summaryTotalLabel: { color: "#a3a3a3", fontSize: 14, fontWeight: "600" },
+  summaryTotalValue: { color: "#e5e5e5", fontSize: 16, fontWeight: "800" },
+  summaryDivider: { height: 1, backgroundColor: "rgba(255,255,255,0.08)", marginVertical: 8 },
+  summaryRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 10,
+  },
+  summaryRowLeft: { flex: 1, minWidth: 0, marginRight: 12 },
+  summaryRowName: { color: "#fff", fontSize: 15, fontWeight: "600" },
+  summaryRowUsername: { color: "#737373", fontSize: 12, marginTop: 1 },
+  summaryRowMeta: { color: "#737373", fontSize: 12, marginTop: 2 },
+  summaryRowRight: { alignItems: "flex-end" },
+  summaryRowAmount: { color: "#8DEB63", fontSize: 15, fontWeight: "700" },
+  summaryRowStatus: { fontSize: 12, fontWeight: "600", marginTop: 2 },
+  summaryStatusPaid: { color: "#8DEB63" },
+  summaryStatusUnpaid: { color: "#fbbf24" },
+  summaryEmpty: { color: "#737373", fontSize: 14, marginBottom: 12 },
+  summaryDueRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingTop: 8,
+  },
+  summaryDueLabel: { color: "#a3a3a3", fontSize: 14, fontWeight: "700" },
+  summaryDueValue: { color: "#fbbf24", fontSize: 18, fontWeight: "800" },
+
+  viewSummaryBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 14,
+    backgroundColor: "#8DEB63",
+    marginTop: 24,
+  },
+  viewSummaryBtnText: { color: "#0a0a0a", fontSize: 16, fontWeight: "700" },
+
+  summaryModalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    justifyContent: "flex-end",
+  },
+  summaryModalCard: {
+    backgroundColor: "#141414",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: "90%",
+    paddingTop: 20,
+    paddingHorizontal: 20,
+    paddingBottom: 32,
+  },
+  summaryModalHeader: { marginBottom: 16, paddingRight: 36 },
+  summaryModalTitle: { color: "#fff", fontSize: 22, fontWeight: "800" },
+  summaryModalSubtitle: { color: "#737373", fontSize: 14, marginTop: 4 },
+  summaryModalClose: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    padding: 4,
+  },
+  summaryModalScroll: { maxHeight: 480 },
+  summarySectionTitle: {
+    color: "#8DEB63",
+    fontSize: 13,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginBottom: 12,
+  },
+  summaryDetailItem: {
+    marginBottom: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.06)",
+  },
+  summaryDetailItemHead: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  summaryDetailItemName: { color: "#fff", fontSize: 15, fontWeight: "600", flex: 1 },
+  summaryDetailItemTotal: { color: "#8DEB63", fontSize: 15, fontWeight: "700" },
+  summaryDetailItemMeta: { color: "#737373", fontSize: 13, marginTop: 4 },
+  summaryDetailWhoPaid: { marginTop: 8, paddingLeft: 12, borderLeftWidth: 2, borderLeftColor: "rgba(141,235,99,0.3)" },
+  summaryDetailWhoPaidRow: { color: "#a3a3a3", fontSize: 13, marginBottom: 4 },
+  summaryDetailRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 8,
+  },
+  summaryDetailLabel: { color: "#a3a3a3", fontSize: 14 },
+  summaryDetailLabelBold: { color: "#e5e5e5", fontSize: 15, fontWeight: "700" },
+  summaryDetailValue: { color: "#e5e5e5", fontSize: 14, fontWeight: "600" },
+  summaryDetailValueBold: { color: "#fff", fontSize: 16, fontWeight: "800" },
+  summaryDetailMeta: { color: "#737373", fontSize: 12, marginTop: 2 },
+  summaryDueValueBold: { color: "#fbbf24", fontSize: 18, fontWeight: "800" },
 
   btnPressed: { opacity: 0.9 },
 });
