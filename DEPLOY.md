@@ -93,7 +93,7 @@ Your project already has **production** and **preview** profiles in `eas.json` w
    ```bash
    cd "/Users/bryant/Documents/IT Project"
    eas build --platform ios --profile production
-   eas submit --platform ios
+  r
    ```
 2. First time:
    - EAS may ask to create the project or link to an existing one; confirm.
@@ -152,6 +152,27 @@ Then run the build again (or use the same command; EAS injects secrets into the 
 
 ## Step 8: After deployment
 
+- **Auth (sign-up OTP, no link)**: Sign up uses email, username, password; after submitting, users must enter a 6-digit code from email (no “follow this link” step). In the [Supabase Dashboard](https://supabase.com/dashboard) → your project → **Authentication** → **Email Templates**, open **Confirm signup** and replace the body so the email shows the OTP only (no confirmation link):
+  - **Subject:** e.g. `Confirm your signup` or `Your verification code`
+  - **Body:** Use the 6-digit token only. Example:
+    ```html
+    <h2>Confirm your signup</h2>
+    <p>Your verification code is: <strong>{{ .Token }}</strong></p>
+    <p>Enter this code in the app to verify your account.</p>
+    ```
+  - Do **not** use `{{ .ConfirmationURL }}` in the body; that sends the “follow this link” flow. Using only `{{ .Token }}` makes Supabase send the OTP that the app’s “Verify & sign in” step expects. The app accepts **6-digit codes only**. Login stays password-based.
+
+- **Force 6-digit email OTP**: If the dashboard “OTP length” (Auth → Providers → Email) is set to 6 but you still receive 8-digit codes, set it via the **Management API** so the Auth service uses 6 digits:
+  1. Create a [Personal Access Token](https://supabase.com/dashboard/account/tokens) (scope: auth config write or project access).
+  2. Get your **project ref** from the project URL: `https://supabase.com/dashboard/project/<PROJECT_REF>`.
+  3. Run (replace `PROJECT_REF` and `YOUR_ACCESS_TOKEN`):
+     ```bash
+     curl -X PATCH "https://api.supabase.com/v1/projects/PROJECT_REF/config/auth" \
+       -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+       -H "Content-Type: application/json" \
+       -d '{"mailer_otp_length": 6}'
+     ```
+  4. After updating, **request a new OTP** (use “Resend code” or sign up again); emails already sent still contain the old length.
 - **OCR**: Uses `https://ezsplit-ocr-sg.onrender.com` (or the URL you set). Ensure the Render service stays running and the URL is reachable.
 - **Faster scanning (aim for 5–10s):** (1) Set `OPENAI_API_KEY` on the **Singapore** Render service so the server uses GPT-4 Vision (much faster than Tesseract). (2) Keep the service warm: on Render free tier, the first request after idle can take **30–60s** (cold start). Use a free cron (e.g. [cron-job.org](https://cron-job.org) or [UptimeRobot](https://uptimerobot.com)) to hit `GET https://ezsplit-ocr-sg.onrender.com/health` every 10–14 minutes. (3) The app resizes and compresses images before upload—both help speed.
 - **Notifications**: Users enable them in the app (Settings → Notifications). Reminders work if APNs was set up (EAS usually does this when you built with “Let EAS handle it” and allowed push).

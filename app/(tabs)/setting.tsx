@@ -22,7 +22,7 @@ import { supabase } from "../lib/supabase";
 import { EZSPLIT_URL } from "../config";
 import { CURRENCIES, getCurrency } from "../lib/currency";
 import { SubscriptionDiamond } from "../components/SubscriptionDiamond";
-import { savePushTokenToProfile } from "../lib/notifications";
+import { savePushTokenToProfile, clearPushTokenFromProfile } from "../lib/notifications";
 import { QUICK_SPLIT_CATEGORIES } from "../lib/quickSplitCategories";
 
 function initials(displayName: string, username: string): string {
@@ -36,7 +36,7 @@ function initials(displayName: string, username: string): string {
 }
 
 export default function SettingScreen() {
-  const { profile, user, logout, refreshProfile, updateUsername, updateDisplayName, updateCurrency, updateAvatarUrl, updateSettlementOwedPrefs } = useAuth();
+  const { profile, user, logout, refreshProfile, updateUsername, updateDisplayName, updateCurrency, updateAvatarUrl, updateSettlementOwedPrefs, updateOcrAiModel } = useAuth();
   const [accountModalVisible, setAccountModalVisible] = useState(false);
   const [currencyModalVisible, setCurrencyModalVisible] = useState(false);
   const [displayNameDraft, setDisplayNameDraft] = useState(profile?.display_name ?? "");
@@ -49,6 +49,7 @@ export default function SettingScreen() {
   const [notificationStatus, setNotificationStatus] = useState<"on" | "off" | "unknown">("unknown");
   const [deletingAccount, setDeletingAccount] = useState(false);
   const [settlementPrefModalVisible, setSettlementPrefModalVisible] = useState(false);
+  const [ocrModelModalVisible, setOcrModelModalVisible] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
@@ -206,6 +207,18 @@ export default function SettingScreen() {
               </View>
               <Ionicons name="chevron-forward" size={18} color="#737373" />
             </Pressable>
+            <Pressable style={({ pressed }) => [styles.cardRow, pressed && styles.pressed]} onPress={() => setOcrModelModalVisible(true)}>
+              <View style={styles.cardRowIcon}>
+                <Ionicons name="scan-outline" size={20} color="#8DEB63" />
+              </View>
+              <View style={styles.cardRowText}>
+                <Text style={styles.cardRowTitle}>AI Model</Text>
+                <Text style={styles.cardRowSub}>
+                  {profile?.ocr_ai_model === "gpt-4o" ? "GPT-4o (more accurate)" : "GPT-4o Mini (faster)"}
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color="#737373" />
+            </Pressable>
             <Pressable
               style={({ pressed }) => [styles.cardRow, pressed && styles.pressed]}
               onPress={() => {
@@ -265,16 +278,27 @@ export default function SettingScreen() {
                 if (!user?.id || notificationLoading) return;
                 setNotificationLoading(true);
                 try {
-                  const result = await savePushTokenToProfile(user.id);
-                  await refreshProfile();
-                  if (result.ok) {
-                    setNotificationStatus("on");
-                    Alert.alert("Notifications", "You will receive reminder notifications when someone sends you a reminder.");
+                  if (notificationStatus === "on") {
+                    const result = await clearPushTokenFromProfile(user.id);
+                    await refreshProfile();
+                    if (result.ok) {
+                      setNotificationStatus("off");
+                      Alert.alert("Notifications", "Notifications are off. Tap again to turn them back on.");
+                    } else {
+                      Alert.alert("Notifications", result.error ?? "Could not turn off.");
+                    }
                   } else {
-                    Alert.alert("Notifications", result.error ?? "Could not enable. Use a physical device and allow notifications in system settings.");
+                    const result = await savePushTokenToProfile(user.id);
+                    await refreshProfile();
+                    if (result.ok) {
+                      setNotificationStatus("on");
+                      Alert.alert("Notifications", "You will receive reminder notifications when someone sends you a reminder.");
+                    } else {
+                      Alert.alert("Notifications", result.error ?? "Could not enable. Use a physical device and allow notifications in system settings.");
+                    }
                   }
                 } catch (e) {
-                  Alert.alert("Notifications", e instanceof Error ? e.message : "Could not enable notifications.");
+                  Alert.alert("Notifications", e instanceof Error ? e.message : "Could not update notifications.");
                 } finally {
                   setNotificationLoading(false);
                 }
@@ -287,7 +311,7 @@ export default function SettingScreen() {
               <View style={styles.cardRowText}>
                 <Text style={styles.cardRowTitle}>Notifications</Text>
                 <Text style={styles.cardRowSub}>
-                  {notificationLoading ? "Enabling…" : notificationStatus === "on" ? "On — you can receive reminders" : "Off — tap to enable reminders"}
+                  {notificationLoading ? (notificationStatus === "on" ? "Turning off…" : "Enabling…") : notificationStatus === "on" ? "On — tap to turn off" : "Off — tap to enable reminders"}
                 </Text>
               </View>
               {notificationLoading ? <ActivityIndicator size="small" color="#8DEB63" /> : notificationStatus === "on" ? <Ionicons name="checkmark-circle" size={20} color="#8DEB63" /> : <Ionicons name="chevron-forward" size={18} color="#737373" />}
@@ -466,6 +490,58 @@ export default function SettingScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      <Modal transparent visible={ocrModelModalVisible} animationType="fade" onRequestClose={() => setOcrModelModalVisible(false)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setOcrModelModalVisible(false)}>
+          <Pressable style={styles.modalCard} onPress={() => {}}>
+            <View style={styles.modalAccent} />
+            <Text style={styles.modalTitle}>AI Model</Text>
+            <Text style={styles.modalSub}>Choose AI model</Text>
+            <View style={styles.ocrModelOptions}>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.ocrModelOption,
+                  profile?.ocr_ai_model === "gpt-4o-mini" && styles.ocrModelOptionActive,
+                  pressed && styles.pressed,
+                ]}
+                onPress={async () => {
+                  await updateOcrAiModel("gpt-4o-mini");
+                  setOcrModelModalVisible(false);
+                }}
+              >
+                <Ionicons name="flash" size={22} color={profile?.ocr_ai_model === "gpt-4o-mini" ? "#8DEB63" : "#737373"} />
+                <View style={styles.ocrModelOptionText}>
+                  <Text style={[styles.ocrModelOptionTitle, profile?.ocr_ai_model === "gpt-4o-mini" && styles.ocrModelOptionTitleActive]}>GPT-4o Mini</Text>
+                  <Text style={styles.ocrModelOptionSub}>Lower accuracy, faster</Text>
+                </View>
+                {profile?.ocr_ai_model === "gpt-4o-mini" && <Ionicons name="checkmark-circle" size={22} color="#8DEB63" />}
+              </Pressable>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.ocrModelOption,
+                  styles.ocrModelOptionLast,
+                  profile?.ocr_ai_model === "gpt-4o" && styles.ocrModelOptionActive,
+                  pressed && styles.pressed,
+                ]}
+                onPress={async () => {
+                  await updateOcrAiModel("gpt-4o");
+                  setOcrModelModalVisible(false);
+                }}
+              >
+                <Ionicons name="sparkles" size={22} color={profile?.ocr_ai_model === "gpt-4o" ? "#8DEB63" : "#737373"} />
+                <View style={styles.ocrModelOptionText}>
+                  <Text style={[styles.ocrModelOptionTitle, profile?.ocr_ai_model === "gpt-4o" && styles.ocrModelOptionTitleActive]}>GPT-4o</Text>
+                  <Text style={styles.ocrModelOptionSub}>Higher accuracy, slower</Text>
+                </View>
+                {profile?.ocr_ai_model === "gpt-4o" && <Ionicons name="checkmark-circle" size={22} color="#8DEB63" />}
+              </Pressable>
+            </View>
+            <Pressable style={({ pressed }) => [styles.ocrModelDoneBtn, pressed && styles.pressed]} onPress={() => setOcrModelModalVisible(false)}>
+              <Text style={styles.ocrModelDoneBtnText}>Done</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -633,4 +709,25 @@ const styles = StyleSheet.create({
   modalCancelText: { color: "#e5e5e5", fontSize: 15, fontWeight: "600" },
   modalSave: { flex: 1, paddingVertical: 14, borderRadius: 14, backgroundColor: "#8DEB63", alignItems: "center" },
   modalSaveText: { color: "#0a0a0a", fontSize: 15, fontWeight: "700" },
+  ocrModelOptions: { marginBottom: 16 },
+  ocrModelOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    marginBottom: 10,
+    backgroundColor: "#0f0f0f",
+  },
+  ocrModelOptionLast: { marginBottom: 0 },
+  ocrModelOptionActive: { borderColor: "rgba(141,235,99,0.4)", backgroundColor: "rgba(141,235,99,0.08)" },
+  ocrModelOptionText: { flex: 1, minWidth: 0 },
+  ocrModelOptionTitle: { color: "#e5e5e5", fontSize: 16, fontWeight: "600" },
+  ocrModelOptionTitleActive: { color: "#8DEB63" },
+  ocrModelOptionSub: { color: "#737373", fontSize: 13, marginTop: 2 },
+  ocrModelDoneBtn: { paddingVertical: 14, borderRadius: 14, backgroundColor: "#8DEB63", alignItems: "center", alignSelf: "stretch" },
+  ocrModelDoneBtnText: { color: "#0a0a0a", fontSize: 15, fontWeight: "700" },
 });

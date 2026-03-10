@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View, Image } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import * as FileSystem from "expo-file-system";
@@ -113,6 +113,8 @@ export default function ScanResultScreen() {
   const [friendsLoading, setFriendsLoading] = useState(false);
   const [friendSearchQuery, setFriendSearchQuery] = useState("");
   const [editLoading, setEditLoading] = useState(false);
+  const [imageEnlargeVisible, setImageEnlargeVisible] = useState(false);
+  const insets = useSafeAreaInsets();
   const hasAssignedMembers = Object.values(assignments).some((memberIndexes) => memberIndexes.length > 0);
 
   const loadReceiptForEdit = useCallback(async () => {
@@ -845,7 +847,13 @@ export default function ScanResultScreen() {
         {/* Receipt hero - no image in manual mode */}
         <View style={styles.heroCard}>
           {!isManualMode && (imageUri ? (
-            <Image source={{ uri: imageUri }} style={styles.heroImage} resizeMode="cover" />
+            <Pressable style={styles.heroImageWrap} onPress={() => setImageEnlargeVisible(true)}>
+              <Image source={{ uri: imageUri }} style={styles.heroImage} resizeMode="cover" />
+              <View style={styles.heroImageTapHint}>
+                <Ionicons name="expand-outline" size={20} color="rgba(255,255,255,0.8)" />
+                <Text style={styles.heroImageTapHintText}>Tap to enlarge</Text>
+              </View>
+            </Pressable>
           ) : (
             <View style={styles.heroPlaceholder}>
               <Ionicons name="receipt-outline" size={48} color="#525252" />
@@ -902,6 +910,20 @@ export default function ScanResultScreen() {
             )}
           </View>
         </View>
+
+        {/* Enlarged receipt image modal - tap anywhere to close */}
+        <Modal visible={imageEnlargeVisible} transparent animationType="fade">
+          <Pressable style={styles.enlargeOverlay} onPress={() => setImageEnlargeVisible(false)}>
+            <View style={styles.enlargeContent} pointerEvents="box-none">
+              {imageUri ? (
+                <Image source={{ uri: imageUri }} style={styles.enlargeImage} resizeMode="contain" pointerEvents="none" />
+              ) : null}
+            </View>
+            <Pressable style={[styles.enlargeCloseBtn, { top: insets.top + 8 }]} onPress={() => setImageEnlargeVisible(false)} hitSlop={16}>
+              <Ionicons name="close" size={28} color="#e5e5e5" />
+            </Pressable>
+          </Pressable>
+        </Modal>
 
         {/* Who's splitting */}
         <View style={styles.section}>
@@ -1319,6 +1341,11 @@ const styles = StyleSheet.create({
   loadingWrap: { flex: 1, justifyContent: "center", alignItems: "center", gap: 12 },
   loadingText: { color: "#a3a3a3", fontSize: 15 },
 
+  enlargeOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.92)", justifyContent: "center", alignItems: "center" },
+  enlargeContent: { flex: 1, width: "100%", justifyContent: "center", paddingHorizontal: 16 },
+  enlargeImage: { width: "100%", height: "85%", alignSelf: "center" },
+  enlargeCloseBtn: { position: "absolute", top: 50, right: 20, width: 44, height: 44, borderRadius: 22, backgroundColor: "rgba(255,255,255,0.15)", alignItems: "center", justifyContent: "center" },
+
   accent: { height: 4, backgroundColor: "#8DEB63", marginBottom: 16 },
   header: { flexDirection: "row", alignItems: "center", marginBottom: 20, gap: 12 },
   backBtn: { padding: 6 },
@@ -1327,7 +1354,10 @@ const styles = StyleSheet.create({
   subtitle: { color: "#a3a3a3", fontSize: 14, marginTop: 2 },
 
   heroCard: { borderRadius: 16, overflow: "hidden", backgroundColor: "#141414", borderWidth: 1, borderColor: "rgba(255,255,255,0.08)", marginBottom: 28 },
+  heroImageWrap: { position: "relative", width: "100%" },
   heroImage: { width: "100%", height: 180, backgroundColor: "#1a1a1a" },
+  heroImageTapHint: { position: "absolute", bottom: 8, right: 8, flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "rgba(0,0,0,0.6)", paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8 },
+  heroImageTapHintText: { color: "rgba(255,255,255,0.9)", fontSize: 12, fontWeight: "500" },
   heroPlaceholder: { width: "100%", height: 140, alignItems: "center", justifyContent: "center", backgroundColor: "#1a1a1a" },
   heroStrip: { flexDirection: "row", alignItems: "center", padding: 16, gap: 14 },
   heroInitialWrap: { width: 44, height: 44, borderRadius: 12, backgroundColor: "rgba(141,235,99,0.2)", alignItems: "center", justifyContent: "center" },

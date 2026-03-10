@@ -35,9 +35,11 @@ type ExpenseGroupRow = { id: string; name: string; category: string; created_at:
 type HistoryFilter = "all" | "paid" | "unpaid";
 type HistoryCategoryTab = "all" | "restaurant" | "travel" | "groceries" | "business" | "others";
 
+type BusinessProjectRow = { id: string; name: string; created_at: string; batch_count: number };
 type HistoryListItem =
   | { type: "receipt"; id: string; title: string; date: string; category: string; meta: string; amountLabel: string; row: HistoryRow }
-  | { type: "trip"; id: string; title: string; date: string; category: string; meta: string; amountLabel: string; group: ExpenseGroupRow };
+  | { type: "trip"; id: string; title: string; date: string; category: string; meta: string; amountLabel: string; group: ExpenseGroupRow }
+  | { type: "project"; id: string; title: string; date: string; category: "business"; meta: string; amountLabel: string; project: BusinessProjectRow };
 
 function getCategoryIcon(category: string): keyof typeof Ionicons.glyphMap {
   const found = QUICK_SPLIT_CATEGORIES.find((c) => c.id === category);
@@ -81,6 +83,7 @@ export default function HistoryTabScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
   const [expenseGroups, setExpenseGroups] = useState<ExpenseGroupRow[]>([]);
+  const [businessProjects, setBusinessProjects] = useState<BusinessProjectRow[]>([]);
   const [categoryTab, setCategoryTab] = useState<HistoryCategoryTab>("all");
   const [historyHostProfiles, setHistoryHostProfiles] = useState<Record<string, { username: string; avatar_url: string | null }>>({});
   const [historyReceiptAvatarMap, setHistoryReceiptAvatarMap] = useState<Record<string, string | null>>({});
@@ -153,6 +156,42 @@ export default function HistoryTabScreen() {
     }
   }, [user?.id]);
 
+  const loadBusinessProjects = useCallback(async () => {
+    if (!user?.id) {
+      setBusinessProjects([]);
+      return;
+    }
+    try {
+      const { data: projects, error } = await supabase
+        .from("business_projects")
+        .select("id, name, created_at")
+        .eq("host_id", user.id)
+        .order("created_at", { ascending: false });
+      if (error) {
+        setBusinessProjects([]);
+        return;
+      }
+      const projectList = (projects ?? []) as { id: string; name: string; created_at: string }[];
+      const projectIds = projectList.map((p) => p.id);
+      if (projectIds.length === 0) {
+        setBusinessProjects(projectList.map((p) => ({ ...p, batch_count: 0 })));
+        return;
+      }
+      const { data: batchRows } = await supabase
+        .from("business_batches")
+        .select("project_id")
+        .in("project_id", projectIds);
+      const countByProject: Record<string, number> = {};
+      projectIds.forEach((id) => (countByProject[id] = 0));
+      (batchRows ?? []).forEach((r: { project_id: string }) => {
+        if (r.project_id) countByProject[r.project_id] = (countByProject[r.project_id] ?? 0) + 1;
+      });
+      setBusinessProjects(projectList.map((p) => ({ ...p, batch_count: countByProject[p.id] ?? 0 })));
+    } catch {
+      setBusinessProjects([]);
+    }
+  }, [user?.id]);
+
   const loadReceipts = useCallback(async () => {
     if (!user?.id) {
       setRows([]);
@@ -205,17 +244,18 @@ export default function HistoryTabScreen() {
     useCallback(() => {
       void loadReceipts();
       void loadExpenseGroups();
-    }, [loadReceipts, loadExpenseGroups])
+      void loadBusinessProjects();
+    }, [loadReceipts, loadExpenseGroups, loadBusinessProjects])
   );
 
   const onRefreshHistory = useCallback(async () => {
     setRefreshing(true);
     try {
-      await Promise.all([loadReceipts(), loadExpenseGroups()]);
+      await Promise.all([loadReceipts(), loadExpenseGroups(), loadBusinessProjects()]);
     } finally {
       setRefreshing(false);
     }
-  }, [loadReceipts, loadExpenseGroups]);
+  }, [loadReceipts, loadExpenseGroups, loadBusinessProjects]);
 
   useEffect(() => {
     const usernames = new Set<string>();
@@ -274,6 +314,11 @@ export default function HistoryTabScreen() {
     return [];
   }, [categoryTab, expenseGroups]);
 
+  const filteredProjects = useMemo(() => {
+    if (categoryTab !== "business" && categoryTab !== "all") return [];
+    return businessProjects;
+  }, [categoryTab, businessProjects]);
+
   const paidCount = useMemo(() => rows.filter((r) => r.paid).length, [rows]);
   const unpaidCount = useMemo(() => rows.filter((r) => !r.paid).length, [rows]);
 
@@ -298,14 +343,24 @@ export default function HistoryTabScreen() {
       amountLabel: "—",
       group: g,
     }));
-    const combined = [...receiptItems, ...tripItems];
+    const projectItems: HistoryListItem[] = filteredProjects.map((p) => ({
+      type: "project",
+      id: p.id,
+      title: p.name,
+      date: p.created_at,
+      category: "business" as const,
+      meta: `${p.batch_count} batch${p.batch_count !== 1 ? "es" : ""} · Sales & Inventory`,
+      amountLabel: "—",
+      project: p,
+    }));
+    const combined = [...receiptItems, ...tripItems, ...projectItems];
     combined.sort((a, b) => {
       const da = new Date(a.date).getTime();
       const db = new Date(b.date).getTime();
       return db - da;
     });
     return combined;
-  }, [filtered, filteredGroups, currencyCode]);
+  }, [filtered, filteredGroups, filteredProjects, currencyCode]);
 
   const deleteReceipt = useCallback(
     async (id: string) => {
@@ -423,27 +478,36 @@ export default function HistoryTabScreen() {
               {historyListItems.map((item) => {
                 const createdByName = item.type === "receipt"
                   ? (profile?.display_name?.trim() || profile?.username || "You")
-                  : (item.group.host_id ? historyHostProfiles[item.group.host_id]?.username ?? "—" : "—");
+                  : item.type === "project"
+                    ? (profile?.display_name?.trim() || profile?.username || "You")
+                    : (item.group.host_id ? historyHostProfiles[item.group.host_id]?.username ?? "—" : "—");
                 const avatarKeysReceipt = item.type === "receipt"
                   ? [...new Set([profile?.username, ...(item.row.split_totals ?? []).map((s) => s?.name).filter(Boolean)] as string[])]
                   : [];
                 const avatarIdsTrip = item.type === "trip"
                   ? [...new Set([item.group.host_id, ...(item.group.member_ids ?? [])].filter(Boolean) as string[])]
                   : [];
+                const avatarCount = item.type === "receipt" ? avatarKeysReceipt.length : item.type === "trip" ? avatarIdsTrip.length : 0;
                 return (
                   <Pressable
-                    key={item.type === "receipt" ? `r-${item.id}` : `t-${item.id}`}
+                    key={item.type === "receipt" ? `r-${item.id}` : item.type === "project" ? `p-${item.id}` : `t-${item.id}`}
                     style={({ pressed }) => [styles.historyRow, pressed && styles.actionBtnPressed]}
                     onPress={() => {
                       if (item.type === "receipt") {
                         router.push({ pathname: "/history/[id]", params: { id: item.id } });
+                      } else if (item.type === "project") {
+                        router.push({ pathname: "/business-project-detail", params: { projectId: item.id } });
                       } else {
                         router.push({ pathname: "/expense-group", params: { groupId: item.id, category: item.category } });
                       }
                     }}
                   >
                     <View style={styles.historyRowIconWrap}>
-                      <Ionicons name={getCategoryIcon(item.category)} size={22} color="#8DEB63" />
+                      <Ionicons
+                        name={item.type === "project" ? "folder-open-outline" : getCategoryIcon(item.category)}
+                        size={22}
+                        color="#8DEB63"
+                      />
                     </View>
                     <View style={styles.historyRowLeft}>
                       <Text style={styles.historyRowTitle} numberOfLines={1}>{item.title}</Text>
@@ -466,27 +530,27 @@ export default function HistoryTabScreen() {
                                 </View>
                               );
                             })
-                          : avatarIdsTrip.slice(0, 7).map((uid, i) => {
-                              const prof = uid ? historyHostProfiles[uid] : null;
-                              const url = prof?.avatar_url ?? null;
-                              const initial = memberInitial(prof?.username ?? "?");
-                              return (
-                                <View key={`${item.id}-${uid}-${i}`} style={[styles.historyAvatar, { marginLeft: i === 0 ? 0 : -6 }]}>
-                                  {url ? (
-                                    <Image source={{ uri: url }} style={styles.historyAvatarImg} />
-                                  ) : (
-                                    <View style={styles.historyAvatarPlaceholder}>
-                                      <Text style={styles.historyAvatarText}>{initial}</Text>
-                                    </View>
-                                  )}
-                                </View>
-                              );
-                            })}
-                        {(item.type === "receipt" ? avatarKeysReceipt.length : avatarIdsTrip.length) > 7 ? (
+                          : item.type === "trip"
+                            ? avatarIdsTrip.slice(0, 7).map((uid, i) => {
+                                const prof = uid ? historyHostProfiles[uid] : null;
+                                const url = prof?.avatar_url ?? null;
+                                const initial = memberInitial(prof?.username ?? "?");
+                                return (
+                                  <View key={`${item.id}-${uid}-${i}`} style={[styles.historyAvatar, { marginLeft: i === 0 ? 0 : -6 }]}>
+                                    {url ? (
+                                      <Image source={{ uri: url }} style={styles.historyAvatarImg} />
+                                    ) : (
+                                      <View style={styles.historyAvatarPlaceholder}>
+                                        <Text style={styles.historyAvatarText}>{initial}</Text>
+                                      </View>
+                                    )}
+                                  </View>
+                                );
+                              })
+                            : null}
+                        {avatarCount > 7 ? (
                           <View style={[styles.historyAvatarMore, { marginLeft: -6 }]}>
-                            <Text style={styles.historyAvatarMoreText}>
-                              +{(item.type === "receipt" ? avatarKeysReceipt.length : avatarIdsTrip.length) - 7}
-                            </Text>
+                            <Text style={styles.historyAvatarMoreText}>+{avatarCount - 7}</Text>
                           </View>
                         ) : null}
                       </View>

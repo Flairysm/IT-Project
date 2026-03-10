@@ -66,7 +66,7 @@ function getCategoryIcon(category: string | undefined): keyof typeof Ionicons.gl
 export default function HomeScreen() {
   const router = useRouter();
   const { user, profile, updateCurrency } = useAuth();
-  const displayName = profile?.username ?? user?.email ?? "User";
+  const displayName = (profile?.display_name && profile.display_name.trim()) || profile?.username || user?.email || "User";
   const currencyCode = profile?.default_currency ?? "MYR";
   const currentCurrency = getCurrency(currencyCode);
   const [currencyModalVisible, setCurrencyModalVisible] = useState(false);
@@ -472,10 +472,11 @@ export default function HomeScreen() {
 
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (OCR_API_KEY) headers["x-api-key"] = OCR_API_KEY;
+      const aiModel = profile?.ocr_ai_model ?? "gpt-4o-mini";
       const res = await fetchWithTimeout(`${OCR_SERVER_URL}/ocr`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ imageBase64: base64 }),
+        body: JSON.stringify({ imageBase64: base64, aiModel }),
         timeoutMs: 90000,
       });
       const text = await res.text();

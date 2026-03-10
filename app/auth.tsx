@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Image,
   Pressable,
@@ -28,7 +28,7 @@ const TEXT = "#f0f0f0";
 const TEXT_MUTED = "#9ca39c";
 const INPUT_BG = "rgba(255,255,255,0.06)";
 
-type AuthScreen = "landing" | "login" | "signup";
+type AuthScreen = "landing" | "login" | "signup" | "otp";
 
 function WaveBlobs() {
   return (
@@ -51,14 +51,24 @@ function DecorativeCircles() {
 }
 
 export default function AuthScreen() {
-  const { user, loading, signUp, login } = useAuth();
+  const { user, loading, signUp, login, verifyOtp, resendOtp } = useAuth();
   const [screen, setScreen] = useState<AuthScreen>("landing");
   const [email, setEmail] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [otpCode, setOtpCode] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [otpFromSignUp, setOtpFromSignUp] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
+
+  // 30-second resend cooldown when on OTP screen
+  useEffect(() => {
+    if (screen !== "otp" || resendCooldown <= 0) return;
+    const t = setInterval(() => setResendCooldown((s) => (s <= 1 ? 0 : s - 1)), 1000);
+    return () => clearInterval(t);
+  }, [screen, resendCooldown]);
 
   if (!loading && user) return <Redirect href="/(tabs)" />;
 
@@ -66,9 +76,10 @@ export default function AuthScreen() {
     setScreen("landing");
     setError(null);
     setEmail("");
+    setUsername("");
     setPassword("");
     setConfirmPassword("");
-    setUsername("");
+    setOtpCode("");
   };
 
   const onSubmit = async () => {
@@ -76,12 +87,43 @@ export default function AuthScreen() {
     setError(null);
     try {
       if (screen === "signup") {
-        await signUp(email, password, confirmPassword, username || undefined);
+        const result = await signUp(email, password, confirmPassword, username || undefined);
+        if (result?.needsOtp) {
+          setOtpFromSignUp(true);
+          setResendCooldown(30);
+          setScreen("otp");
+        }
       } else {
         await login(email, password);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Authentication failed");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const onVerifyOtp = async () => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await verifyOtp(email, otpCode);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Invalid or expired code");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const onResendOtp = async () => {
+    if (resendCooldown > 0) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await resendOtp(email);
+      setResendCooldown(30);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not resend code");
     } finally {
       setSubmitting(false);
     }
@@ -116,6 +158,89 @@ export default function AuthScreen() {
           </View>
         </View>
         <WaveBlobs />
+      </SafeAreaView>
+    );
+  }
+
+  // —— OTP verification step ————————————————————————————————————————————————
+  if (screen === "otp") {
+    return (
+      <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
+        <StatusBar style="light" />
+        <KeyboardAvoidingView
+          style={styles.keyboardWrap}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0}
+        >
+          <ScrollView
+            contentContainerStyle={styles.scrollContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            <Pressable
+              onPress={() => { setScreen(otpFromSignUp ? "signup" : "login"); setError(null); setOtpCode(""); }}
+              style={styles.backBtn}
+              hitSlop={12}
+            >
+              <Ionicons name="arrow-back" size={24} color={TEXT} />
+            </Pressable>
+            <View style={styles.formCard}>
+              <DecorativeCircles />
+              <Text style={styles.formTitle}>Check your email</Text>
+              <Text style={styles.formSubtitle}>
+                We sent a 6-digit code to {email}. Enter it below to verify your account.
+              </Text>
+              <View style={styles.inputRow}>
+                <Ionicons name="keypad-outline" size={20} color={TEXT_MUTED} style={styles.inputIcon} />
+                <TextInput
+                  value={otpCode}
+                  onChangeText={(t) => { setOtpCode(t.replace(/\D/g, "").slice(0, 6)); setError(null); }}
+                  style={styles.input}
+                  placeholder="000000"
+                  placeholderTextColor={TEXT_MUTED}
+                  keyboardType="number-pad"
+                  maxLength={6}
+                  autoComplete="one-time-code"
+                  autoFocus
+                />
+              </View>
+              {error ? (
+                <View style={styles.errorWrap}>
+                  <Ionicons name="warning-outline" size={18} color="#fca5a5" />
+                  <Text style={styles.errorText}>{error}</Text>
+                  <Pressable onPress={() => setError(null)} style={styles.errorDismiss} hitSlop={8}>
+                    <Ionicons name="close" size={20} color={TEXT_MUTED} />
+                  </Pressable>
+                </View>
+              ) : null}
+              <Pressable
+                onPress={() => void onVerifyOtp()}
+                style={({ pressed }) => [styles.primaryBtn, pressed && styles.pressed]}
+                disabled={submitting || otpCode.length !== 6}
+              >
+                <Text style={styles.landingBtnPrimaryText}>
+                  {submitting ? "Verifying…" : "Verify & sign in"}
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => void onResendOtp()}
+                style={({ pressed }) => [
+                  styles.switchBtn,
+                  (resendCooldown > 0 || submitting) && styles.resendDisabled,
+                  pressed && styles.pressed,
+                ]}
+                disabled={resendCooldown > 0 || submitting}
+              >
+                <Text style={styles.switchBtnText}>
+                  {resendCooldown > 0
+                    ? `Resend code (${resendCooldown}s)`
+                    : "Resend code"}
+                </Text>
+              </Pressable>
+            </View>
+          </ScrollView>
+          <WaveBlobs />
+        </KeyboardAvoidingView>
       </SafeAreaView>
     );
   }
@@ -167,7 +292,7 @@ export default function AuthScreen() {
                   value={username}
                   onChangeText={(t) => { setUsername(t); setError(null); }}
                   style={styles.input}
-                  placeholder="Username (for friends to find you)"
+                  placeholder="Username"
                   placeholderTextColor={TEXT_MUTED}
                   autoCapitalize="none"
                   autoComplete="username"
@@ -450,6 +575,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     marginTop: 20,
+  },
+  resendDisabled: {
+    opacity: 0.5,
   },
   switchBtnText: {
     color: TEXT_MUTED,

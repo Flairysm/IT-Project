@@ -503,11 +503,17 @@ async function ocrViaReceiptOcr(imageBuffer) {
   return data.text ?? data.result ?? data.extracted_text ?? (typeof data === "string" ? data : "");
 }
 
+/** Allowed OpenAI vision models for receipt extraction. */
+const ALLOWED_OCR_AI_MODELS = ["gpt-4o-mini", "gpt-4o"];
+
 /**
- * Optional: extract receipt data using OpenAI Vision (gpt-4o-mini).
+ * Optional: extract receipt data using OpenAI Vision.
  * Returns same shape as extractReceiptInfo so the app works unchanged.
+ * @param {string} imageBase64
+ * @param {string} [modelId] - e.g. "gpt-4o-mini" or "gpt-4o"
  */
-async function extractReceiptWithVision(imageBase64) {
+async function extractReceiptWithVision(imageBase64, modelId) {
+  const model = ALLOWED_OCR_AI_MODELS.includes(modelId) ? modelId : "gpt-4o-mini";
   const prompt = `Extract receipt data from this image. Return ONLY a single JSON object (no markdown, no code block) with this exact structure:
 {
   "merchant": "store or restaurant name or null",
@@ -530,7 +536,7 @@ Rules:
       Authorization: `Bearer ${OPENAI_API_KEY}`,
     },
     body: JSON.stringify({
-      model: "gpt-4o-mini",
+      model,
       messages: [
         { role: "system", content: "You extract receipt data. Reply with only valid JSON, no other text." },
         {
@@ -582,17 +588,17 @@ Rules:
 
 app.post("/ocr", optionalOcrAuth, ocrLimiter, async (req, res) => {
   try {
-    const { imageBase64 } = req.body;
+    const { imageBase64, aiModel } = req.body;
     if (!imageBase64) {
       return res.status(400).json({ error: "Missing imageBase64" });
     }
     const { buffer, base64: normalizedBase64 } = await normalizeImagePayload(imageBase64);
 
-    // Prefer AI vision when configured (usually better for mixed language and layout)
+    // Always try AI vision first when configured; OCR is fallback only
     if (OPENAI_API_KEY) {
       try {
-        console.log("OCR request: using OpenAI Vision...");
-        const extracted = await extractReceiptWithVision(normalizedBase64);
+        console.log("OCR request: using OpenAI Vision, model:", aiModel || "gpt-4o-mini");
+        const extracted = await extractReceiptWithVision(normalizedBase64, aiModel);
         console.log("OCR request: Vision OK, items:", extracted.items?.length ?? 0);
         return res.json({ text: "(extracted with AI vision)", extracted, source: "vision" });
       } catch (aiErr) {

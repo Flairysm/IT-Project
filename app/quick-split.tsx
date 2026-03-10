@@ -9,8 +9,12 @@ export default function QuickSplitScreen() {
   const router = useRouter();
 
   const onCategory = (category: QuickSplitCategory) => {
-    if (category === "travel" || category === "business") {
+    if (category === "travel") {
       router.push({ pathname: "/expense-group", params: { category } });
+      return;
+    }
+    if (category === "business") {
+      router.push("/business-choice");
       return;
     }
     router.push({ pathname: "/scan-result", params: { source: "manual", category } });

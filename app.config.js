@@ -6,6 +6,7 @@ module.exports = ({ config }) => {
     config?.extra?.eas?.projectId;
   return {
     ...config,
+    plugins: [...(config.plugins || []), "@react-native-community/datetimepicker"],
     extra: {
       ...config?.extra,
       eas: {

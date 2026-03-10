@@ -4,6 +4,17 @@ import { Platform } from "react-native";
 import Constants from "expo-constants";
 import { supabase } from "./supabase";
 
+// So the app receives and shows notifications (foreground + tap). Without this, Expo may show the push but the app won't handle it.
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+    shouldAnnounce: true,
+  }),
+});
+
 export type NotificationStatus = "granted" | "denied" | "undetermined" | "unknown";
 
 export async function getNotificationPermissionStatus(): Promise<NotificationStatus> {
@@ -63,6 +74,18 @@ export async function savePushTokenToProfile(userId: string): Promise<{ ok: bool
   const { error } = await supabase
     .from("profiles")
     .update({ push_token: token })
+    .eq("id", userId);
+  if (error) {
+    return { ok: false, error: error.message };
+  }
+  return { ok: true };
+}
+
+/** Opt out: clear push token from profile so the user no longer receives reminder notifications. */
+export async function clearPushTokenFromProfile(userId: string): Promise<{ ok: boolean; error?: string }> {
+  const { error } = await supabase
+    .from("profiles")
+    .update({ push_token: null })
     .eq("id", userId);
   if (error) {
     return { ok: false, error: error.message };
