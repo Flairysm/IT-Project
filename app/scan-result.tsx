@@ -127,7 +127,7 @@ export default function ScanResultScreen() {
     try {
       const { data: rec, error: recErr } = await supabase
         .from("receipts")
-        .select("id, host_id, merchant, receipt_date, total_amount, currency, split_totals, tax_amount")
+        .select("id, host_id, merchant, receipt_date, total_amount, currency, split_totals, tax_amount, service_charge, other_charges")
         .eq("id", receiptId)
         .single();
       if (recErr) throw new Error(recErr.message);

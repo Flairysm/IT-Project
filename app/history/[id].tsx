@@ -580,18 +580,23 @@ export default function HistoryDetailScreen() {
           </Pressable>
         </ScrollView>
 
-        {/* Detailed summary modal */}
+        {/* Receipt summary modal — backdrop and card are siblings so card scroll works */}
         <Modal visible={summaryModalVisible} transparent animationType="slide">
-          <Pressable style={styles.summaryModalBackdrop} onPress={() => setSummaryModalVisible(false)}>
-            <Pressable style={styles.summaryModalCard} onPress={() => {}}>
+          <View style={styles.summaryModalContainer}>
+            <Pressable style={styles.summaryModalBackdrop} onPress={() => setSummaryModalVisible(false)} />
+            <View style={styles.summaryModalCard}>
               <View style={styles.summaryModalHeader}>
                 <Text style={styles.summaryModalTitle}>Receipt summary</Text>
-                <Text style={styles.summaryModalSubtitle}>Detailed breakdown</Text>
                 <Pressable onPress={() => setSummaryModalVisible(false)} style={styles.summaryModalClose} hitSlop={12}>
                   <Ionicons name="close" size={24} color="#737373" />
                 </Pressable>
               </View>
-              <ScrollView style={styles.summaryModalScroll} showsVerticalScrollIndicator={false}>
+              <ScrollView
+                style={styles.summaryModalScroll}
+                contentContainerStyle={styles.summaryModalScrollContent}
+                showsVerticalScrollIndicator={true}
+                keyboardShouldPersistTaps="handled"
+              >
                 {receiptItems.length > 0 ? (
                   <>
                     <Text style={styles.summarySectionTitle}>Item breakdown</Text>
@@ -626,48 +631,85 @@ export default function HistoryDetailScreen() {
                       );
                     })}
                     {(() => {
+                      const splitTotals = receipt.split_totals ?? [];
+                      const fromAssignments = receiptItems.length > 0 && assignments.length > 0
+                        ? [...new Set(assignments.map((a) => a.user_id))].map((uid) => {
+                            const p = assignmentProfiles[uid];
+                            const displayName = (p?.display_name && p.display_name.trim()) || p?.username || "—";
+                            const username = (p?.username ?? "").trim() || uid;
+                            return { name: username, displayName };
+                          })
+                        : [];
+                      const members = splitTotals.length > 0
+                        ? splitTotals.map((row) => {
+                            const prof = splitProfiles[(row.name ?? "").trim().toLowerCase()];
+                            const displayName = (prof?.display_name ?? "").trim() || (row.name ?? "").trim() || "—";
+                            return { name: row.name ?? "", displayName };
+                          })
+                        : fromAssignments.map((m) => ({ name: m.name, displayName: m.displayName }));
+                      const memberCount = members.length || 1;
                       const subtotal = receiptItems.reduce((s, i) => s + (parseFloat(i.total_price) || 0), 0);
                       const total = parseFloat(receipt.total || "0") || 0;
                       const storedTax = receipt.tax_amount != null && receipt.tax_amount.trim() !== "" ? parseFloat(receipt.tax_amount) : null;
                       const taxAmount = Number.isFinite(storedTax) && storedTax >= 0 ? storedTax : Math.round((total - subtotal) * 100) / 100;
-                      const showTax = (Number.isFinite(storedTax) && storedTax >= 0) || Math.abs(taxAmount) > 0.001;
-                      return showTax ? (
-                        <View style={styles.summaryDetailItem}>
-                          <View style={styles.summaryDetailItemHead}>
-                            <Text style={styles.summaryDetailItemName}>Tax</Text>
-                            <Text style={styles.summaryDetailItemTotal}>{formatAmount(taxAmount, currencyCode)}</Text>
-                          </View>
-                          <Text style={styles.summaryDetailItemMeta}>Split evenly among members</Text>
-                        </View>
-                      ) : null;
-                    })()}
-                    {(() => {
-                      const sc = receipt.service_charge != null && receipt.service_charge.trim() !== "" ? parseFloat(receipt.service_charge) : null;
-                      const serviceAmount = Number.isFinite(sc) && sc >= 0 ? sc : 0;
-                      const showService = (Number.isFinite(sc) && sc >= 0) || Math.abs(serviceAmount) > 0.001;
-                      return showService ? (
-                        <View style={styles.summaryDetailItem}>
-                          <View style={styles.summaryDetailItemHead}>
-                            <Text style={styles.summaryDetailItemName}>Service tax</Text>
-                            <Text style={styles.summaryDetailItemTotal}>{formatAmount(serviceAmount, currencyCode)}</Text>
-                          </View>
-                          <Text style={styles.summaryDetailItemMeta}>Split evenly among members</Text>
-                        </View>
-                      ) : null;
-                    })()}
-                    {(() => {
+                      const taxPerPerson = Math.round((taxAmount / memberCount) * 100) / 100;
                       const oc = receipt.other_charges != null && receipt.other_charges.trim() !== "" ? parseFloat(receipt.other_charges) : null;
                       const otherAmount = Number.isFinite(oc) && oc >= 0 ? oc : 0;
-                      const showOther = (Number.isFinite(oc) && oc >= 0) || Math.abs(otherAmount) > 0.001;
-                      return showOther ? (
-                        <View style={styles.summaryDetailItem}>
-                          <View style={styles.summaryDetailItemHead}>
-                            <Text style={styles.summaryDetailItemName}>Other charges</Text>
-                            <Text style={styles.summaryDetailItemTotal}>{formatAmount(otherAmount, currencyCode)}</Text>
+                      const serviceAmount = (() => {
+                        const sc = receipt.service_charge != null && receipt.service_charge.trim() !== "" ? parseFloat(receipt.service_charge) : null;
+                        if (Number.isFinite(sc) && sc >= 0) return sc;
+                        if (total && subtotal >= 0) return Math.max(0, Math.round((total - subtotal - taxAmount - otherAmount) * 100) / 100);
+                        return 0;
+                      })();
+                      const servicePerPerson = Math.round((serviceAmount / memberCount) * 100) / 100;
+                      const otherPerPerson = Math.round((otherAmount / memberCount) * 100) / 100;
+                      return (
+                        <>
+                          <Text style={[styles.summarySectionTitle, { marginTop: 16 }]}>Tax, service charge & other</Text>
+                          <View style={styles.summaryDetailItem}>
+                            <View style={styles.summaryDetailItemHead}>
+                              <Text style={styles.summaryDetailItemName}>Tax</Text>
+                              <Text style={styles.summaryDetailItemTotal}>{formatAmount(taxAmount, currencyCode)}</Text>
+                            </View>
+                            <Text style={styles.summaryDetailItemMeta}>Split evenly. Each person pays:</Text>
+                            <View style={styles.summaryDetailWhoPaid}>
+                              {members.map((m, i) => (
+                                <Text key={m.name || i} style={styles.summaryDetailWhoPaidRow}>
+                                  {m.displayName}: {formatAmount(taxPerPerson, currencyCode)}
+                                </Text>
+                              ))}
+                            </View>
                           </View>
-                          <Text style={styles.summaryDetailItemMeta}>Split evenly among members</Text>
-                        </View>
-                      ) : null;
+                          <View style={styles.summaryDetailItem}>
+                            <View style={styles.summaryDetailItemHead}>
+                              <Text style={styles.summaryDetailItemName}>Service tax / service charge</Text>
+                              <Text style={styles.summaryDetailItemTotal}>{formatAmount(serviceAmount, currencyCode)}</Text>
+                            </View>
+                            <Text style={styles.summaryDetailItemMeta}>Split evenly. Each person pays:</Text>
+                            <View style={styles.summaryDetailWhoPaid}>
+                              {members.map((m, i) => (
+                                <Text key={m.name || i} style={styles.summaryDetailWhoPaidRow}>
+                                  {m.displayName}: {formatAmount(servicePerPerson, currencyCode)}
+                                </Text>
+                              ))}
+                            </View>
+                          </View>
+                          <View style={styles.summaryDetailItem}>
+                            <View style={styles.summaryDetailItemHead}>
+                              <Text style={styles.summaryDetailItemName}>Other charges</Text>
+                              <Text style={styles.summaryDetailItemTotal}>{formatAmount(otherAmount, currencyCode)}</Text>
+                            </View>
+                            <Text style={styles.summaryDetailItemMeta}>Split evenly. Each person pays:</Text>
+                            <View style={styles.summaryDetailWhoPaid}>
+                              {members.map((m, i) => (
+                                <Text key={m.name || i} style={styles.summaryDetailWhoPaidRow}>
+                                  {m.displayName}: {formatAmount(otherPerPerson, currencyCode)}
+                                </Text>
+                              ))}
+                            </View>
+                          </View>
+                        </>
+                      );
                     })()}
                     <View style={styles.summaryDivider} />
                     {(() => {
@@ -717,6 +759,79 @@ export default function HistoryDetailScreen() {
                 ) : (
                   <>
                     <Text style={styles.summaryEmpty}>No line items on this receipt.</Text>
+                    {(() => {
+                      const members = receipt.split_totals ?? [];
+                      const memberCount = members.length || 1;
+                      const total = parseFloat(receipt.total || "0") || 0;
+                      const storedTax = receipt.tax_amount != null && receipt.tax_amount.trim() !== "" ? parseFloat(receipt.tax_amount) : null;
+                      const taxAmount = Number.isFinite(storedTax) && storedTax >= 0 ? storedTax : 0;
+                      const taxPerPerson = memberCount > 0 ? Math.round((taxAmount / memberCount) * 100) / 100 : 0;
+                      const sc = receipt.service_charge != null && receipt.service_charge.trim() !== "" ? parseFloat(receipt.service_charge) : null;
+                      const serviceAmount = Number.isFinite(sc) && sc >= 0 ? sc : 0;
+                      const servicePerPerson = memberCount > 0 ? Math.round((serviceAmount / memberCount) * 100) / 100 : 0;
+                      const oc = receipt.other_charges != null && receipt.other_charges.trim() !== "" ? parseFloat(receipt.other_charges) : null;
+                      const otherAmount = Number.isFinite(oc) && oc >= 0 ? oc : 0;
+                      const otherPerPerson = memberCount > 0 ? Math.round((otherAmount / memberCount) * 100) / 100 : 0;
+                      return (
+                        <>
+                          {(Number.isFinite(taxAmount) && taxAmount >= 0) || Math.abs(taxAmount) > 0.001 ? (
+                            <View style={styles.summaryDetailItem}>
+                              <View style={styles.summaryDetailItemHead}>
+                                <Text style={styles.summaryDetailItemName}>Tax</Text>
+                                <Text style={styles.summaryDetailItemTotal}>{formatAmount(taxAmount, currencyCode)}</Text>
+                              </View>
+                              <Text style={styles.summaryDetailItemMeta}>Split evenly among members</Text>
+                              {members.length > 0 ? (
+                                <View style={styles.summaryDetailWhoPaid}>
+                                  <Text style={styles.summaryDetailWhoPaidTitle}>Per person:</Text>
+                                  {members.map((row) => {
+                                    const prof = splitProfiles[row.name.trim().toLowerCase()];
+                                    const displayName = (prof?.display_name ?? "").trim() || row.name;
+                                    return <Text key={row.name} style={styles.summaryDetailWhoPaidRow}>{displayName}: {formatAmount(taxPerPerson, currencyCode)}</Text>;
+                                  })}
+                                </View>
+                              ) : null}
+                            </View>
+                          ) : null}
+                          <View style={styles.summaryDetailItem}>
+                            <View style={styles.summaryDetailItemHead}>
+                              <Text style={styles.summaryDetailItemName}>Service tax</Text>
+                              <Text style={styles.summaryDetailItemTotal}>{formatAmount(serviceAmount, currencyCode)}</Text>
+                            </View>
+                            <Text style={styles.summaryDetailItemMeta}>Split evenly among members</Text>
+                            {members.length > 0 ? (
+                              <View style={styles.summaryDetailWhoPaid}>
+                                <Text style={styles.summaryDetailWhoPaidTitle}>Per person:</Text>
+                                {members.map((row) => {
+                                  const prof = splitProfiles[row.name.trim().toLowerCase()];
+                                  const displayName = (prof?.display_name ?? "").trim() || row.name;
+                                  return <Text key={row.name} style={styles.summaryDetailWhoPaidRow}>{displayName}: {formatAmount(servicePerPerson, currencyCode)}</Text>;
+                                })}
+                              </View>
+                            ) : null}
+                          </View>
+                          {(Number.isFinite(otherAmount) && otherAmount >= 0) || Math.abs(otherAmount) > 0.001 ? (
+                            <View style={styles.summaryDetailItem}>
+                              <View style={styles.summaryDetailItemHead}>
+                                <Text style={styles.summaryDetailItemName}>Other charges</Text>
+                                <Text style={styles.summaryDetailItemTotal}>{formatAmount(otherAmount, currencyCode)}</Text>
+                              </View>
+                              <Text style={styles.summaryDetailItemMeta}>Split evenly among members</Text>
+                              {members.length > 0 ? (
+                                <View style={styles.summaryDetailWhoPaid}>
+                                  <Text style={styles.summaryDetailWhoPaidTitle}>Per person:</Text>
+                                  {members.map((row) => {
+                                    const prof = splitProfiles[row.name.trim().toLowerCase()];
+                                    const displayName = (prof?.display_name ?? "").trim() || row.name;
+                                    return <Text key={row.name} style={styles.summaryDetailWhoPaidRow}>{displayName}: {formatAmount(otherPerPerson, currencyCode)}</Text>;
+                                  })}
+                                </View>
+                              ) : null}
+                            </View>
+                          ) : null}
+                        </>
+                      );
+                    })()}
                     <View style={styles.summaryDetailRow}>
                       <Text style={styles.summaryDetailLabelBold}>Receipt total</Text>
                       <Text style={styles.summaryDetailValueBold}>{formatAmount(parseFloat(receipt.total || "0"), currencyCode)}</Text>
@@ -751,8 +866,8 @@ export default function HistoryDetailScreen() {
                   </>
                 )}
               </ScrollView>
-            </Pressable>
-          </Pressable>
+            </View>
+          </View>
         </Modal>
 
         <Modal
@@ -1168,8 +1283,15 @@ const styles = StyleSheet.create({
   viewSummaryBtnText: { color: "#0a0a0a", fontSize: 16, fontWeight: "700" },
 
   summaryModalBackdrop: {
-    flex: 1,
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     backgroundColor: "rgba(0,0,0,0.6)",
+  },
+  summaryModalContainer: {
+    flex: 1,
     justifyContent: "flex-end",
   },
   summaryModalCard: {
@@ -1180,17 +1302,15 @@ const styles = StyleSheet.create({
     paddingTop: 20,
     paddingHorizontal: 20,
     paddingBottom: 32,
+    zIndex: 1,
   },
-  summaryModalHeader: { marginBottom: 16, paddingRight: 36 },
+  summaryModalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 16 },
   summaryModalTitle: { color: "#fff", fontSize: 22, fontWeight: "800" },
-  summaryModalSubtitle: { color: "#737373", fontSize: 14, marginTop: 4 },
   summaryModalClose: {
-    position: "absolute",
-    top: 0,
-    right: 0,
     padding: 4,
   },
-  summaryModalScroll: { maxHeight: 480 },
+  summaryModalScroll: { maxHeight: 460 },
+  summaryModalScrollContent: { paddingBottom: 24 },
   summarySectionTitle: {
     color: "#8DEB63",
     fontSize: 13,
@@ -1215,7 +1335,15 @@ const styles = StyleSheet.create({
   summaryDetailItemTotal: { color: "#8DEB63", fontSize: 15, fontWeight: "700" },
   summaryDetailItemMeta: { color: "#737373", fontSize: 13, marginTop: 4 },
   summaryDetailWhoPaid: { marginTop: 8, paddingLeft: 12, borderLeftWidth: 2, borderLeftColor: "rgba(141,235,99,0.3)" },
+  summaryDetailWhoPaidTitle: { color: "#8DEB63", fontSize: 12, fontWeight: "700", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 },
   summaryDetailWhoPaidRow: { color: "#a3a3a3", fontSize: 13, marginBottom: 4 },
+  summaryDetailWhoPaidRowBold: { color: "#e5e5e5", fontSize: 14, fontWeight: "600", marginBottom: 6 },
+  summaryChargesPerPersonCard: { marginTop: 12, padding: 14, backgroundColor: "rgba(141,235,99,0.08)", borderRadius: 12, borderWidth: 1, borderColor: "rgba(141,235,99,0.2)" },
+  summaryChargesPerPersonRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.06)" },
+  summaryChargesPerPersonRowLast: { borderBottomWidth: 0 },
+  summaryChargesPerPersonName: { color: "#fff", fontSize: 15, fontWeight: "700", flex: 1 },
+  summaryChargesPerPersonAmounts: { alignItems: "flex-end", gap: 2 },
+  summaryChargesPerPersonLabel: { color: "#8DEB63", fontSize: 13, fontWeight: "600" },
   summaryDetailRow: {
     flexDirection: "row",
     justifyContent: "space-between",

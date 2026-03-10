@@ -12,6 +12,7 @@ import { SubscriptionDiamond } from "../components/SubscriptionDiamond";
 type FriendRow = {
   id: string;
   username: string;
+  display_name?: string | null;
   avatar_url?: string | null;
   status: "accepted" | "pending_sent" | "pending_received";
   friendshipId: string;
@@ -62,24 +63,24 @@ export default function FriendsScreen() {
 
       for (const row of asUser || []) {
         if (row.status === "accepted") {
-          const { data: prof } = await supabase.from("profiles").select("username, avatar_url").eq("id", row.friend_id).single();
-          const p = prof as { username?: string; avatar_url?: string | null } | null;
-          accepted.push({ id: row.friend_id, username: p?.username ?? "?", avatar_url: p?.avatar_url ?? null, status: "accepted", friendshipId: row.id });
+          const { data: prof } = await supabase.from("profiles").select("username, display_name, avatar_url").eq("id", row.friend_id).single();
+          const p = prof as { username?: string; display_name?: string | null; avatar_url?: string | null } | null;
+          accepted.push({ id: row.friend_id, username: p?.username ?? "?", display_name: p?.display_name ?? null, avatar_url: p?.avatar_url ?? null, status: "accepted", friendshipId: row.id });
         } else if (row.status === "pending") {
-          const { data: prof } = await supabase.from("profiles").select("username, avatar_url").eq("id", row.friend_id).single();
-          const p = prof as { username?: string; avatar_url?: string | null } | null;
-          pendingList.push({ id: row.friend_id, username: p?.username ?? "?", avatar_url: p?.avatar_url ?? null, status: "pending_sent", friendshipId: row.id });
+          const { data: prof } = await supabase.from("profiles").select("username, display_name, avatar_url").eq("id", row.friend_id).single();
+          const p = prof as { username?: string; display_name?: string | null; avatar_url?: string | null } | null;
+          pendingList.push({ id: row.friend_id, username: p?.username ?? "?", display_name: p?.display_name ?? null, avatar_url: p?.avatar_url ?? null, status: "pending_sent", friendshipId: row.id });
         }
       }
       for (const row of asFriend || []) {
         if (row.status === "accepted") {
-          const { data: prof } = await supabase.from("profiles").select("username, avatar_url").eq("id", row.user_id).single();
-          const p = prof as { username?: string; avatar_url?: string | null } | null;
-          if (!accepted.some((f) => f.id === row.user_id)) accepted.push({ id: row.user_id, username: p?.username ?? "?", avatar_url: p?.avatar_url ?? null, status: "accepted", friendshipId: row.id });
+          const { data: prof } = await supabase.from("profiles").select("username, display_name, avatar_url").eq("id", row.user_id).single();
+          const p = prof as { username?: string; display_name?: string | null; avatar_url?: string | null } | null;
+          if (!accepted.some((f) => f.id === row.user_id)) accepted.push({ id: row.user_id, username: p?.username ?? "?", display_name: p?.display_name ?? null, avatar_url: p?.avatar_url ?? null, status: "accepted", friendshipId: row.id });
         } else if (row.status === "pending") {
-          const { data: prof } = await supabase.from("profiles").select("username, avatar_url").eq("id", row.user_id).single();
-          const p = prof as { username?: string; avatar_url?: string | null } | null;
-          pendingList.push({ id: row.user_id, username: p?.username ?? "?", avatar_url: p?.avatar_url ?? null, status: "pending_received", friendshipId: row.id });
+          const { data: prof } = await supabase.from("profiles").select("username, display_name, avatar_url").eq("id", row.user_id).single();
+          const p = prof as { username?: string; avatar_url?: string | null; display_name?: string | null } | null;
+          pendingList.push({ id: row.user_id, username: p?.username ?? "?", display_name: p?.display_name ?? null, avatar_url: p?.avatar_url ?? null, status: "pending_received", friendshipId: row.id });
         }
       }
       setFriends(accepted);
@@ -107,7 +108,8 @@ export default function FriendsScreen() {
   const filteredFriends = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return friends;
-    return friends.filter((f) => f.username.toLowerCase().includes(q) || displayName(f.username).toLowerCase().includes(q));
+    const display = (f: FriendRow) => (f.display_name && f.display_name.trim()) || displayName(f.username);
+    return friends.filter((f) => f.username.toLowerCase().includes(q) || display(f).toLowerCase().includes(q) || (f.display_name && f.display_name.toLowerCase().includes(q)));
   }, [friends, searchQuery]);
 
   const incomingRequests = useMemo(() => pending.filter((p) => p.status === "pending_received"), [pending]);
@@ -236,7 +238,7 @@ export default function FriendsScreen() {
                     ) : null}
                   </View>
                 )}
-                <Text style={styles.requestName} numberOfLines={1}>{displayName(p.username)}</Text>
+                <Text style={styles.requestName} numberOfLines={1}>{(p.display_name && p.display_name.trim()) || displayName(p.username)}</Text>
                 <Text style={styles.requestHandle} numberOfLines={1}>@{p.username}</Text>
                 {p.status === "pending_received" ? (
                   <View style={styles.requestActions}>
@@ -303,7 +305,7 @@ export default function FriendsScreen() {
                     </View>
                   )}
                   <View style={styles.listRowCenter}>
-                    <Text style={styles.listRowName} numberOfLines={1}>{displayName(f.username)}</Text>
+                    <Text style={styles.listRowName} numberOfLines={1}>{(f.display_name && f.display_name.trim()) || displayName(f.username)}</Text>
                     <Text style={styles.listRowHandle} numberOfLines={1}>@{f.username}</Text>
                   </View>
                   <Ionicons name="chevron-forward" size={20} color="#525252" />
@@ -340,7 +342,7 @@ export default function FriendsScreen() {
                     </View>
                   )}
                   <View style={styles.listRowCenter}>
-                    <Text style={styles.listRowName} numberOfLines={1}>{displayName(p.username)}</Text>
+                    <Text style={styles.listRowName} numberOfLines={1}>{(p.display_name && p.display_name.trim()) || displayName(p.username)}</Text>
                     <Text style={styles.listRowHandle} numberOfLines={1}>Wants to be friends</Text>
                   </View>
                   <View style={styles.requestActions}>
@@ -381,7 +383,7 @@ export default function FriendsScreen() {
                     </View>
                   )}
                   <View style={styles.listRowCenter}>
-                    <Text style={styles.listRowName} numberOfLines={1}>{displayName(p.username)}</Text>
+                    <Text style={styles.listRowName} numberOfLines={1}>{(p.display_name && p.display_name.trim()) || displayName(p.username)}</Text>
                     <Text style={styles.listRowHandle} numberOfLines={1}>@{p.username}</Text>
                   </View>
                   <View style={styles.pendingChip}>
