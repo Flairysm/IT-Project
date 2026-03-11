@@ -50,8 +50,9 @@ export default function BusinessProjectDetailScreen() {
   const [loading, setLoading] = useState(true);
   const [addBatchModalVisible, setAddBatchModalVisible] = useState(false);
   const [batchName, setBatchName] = useState("");
-  const [friends, setFriends] = useState<{ id: string; username: string; display_name?: string | null }[]>([]);
+  const [friends, setFriends] = useState<{ id: string; username: string; display_name?: string | null; avatar_url?: string | null }[]>([]);
   const [selectedProjectMemberIds, setSelectedProjectMemberIds] = useState<string[]>([]);
+  const [addMemberSearchQuery, setAddMemberSearchQuery] = useState("");
   const [saving, setSaving] = useState(false);
   const [projectSettingsVisible, setProjectSettingsVisible] = useState(false);
   const [projectEditName, setProjectEditName] = useState("");
@@ -123,6 +124,15 @@ export default function BusinessProjectDetailScreen() {
         profitByBatch[row.batch_id] = (profitByBatch[row.batch_id] ?? 0) + (Number(row.sold_price) - Number(row.purchase_price));
       }
     });
+    const { data: ledgerRows } = await supabase
+      .from("business_ledger")
+      .select("batch_id, type, amount")
+      .in("batch_id", batchIds);
+    (ledgerRows ?? []).forEach((row: { batch_id: string; type: string; amount: number }) => {
+      const amt = Number(row.amount) || 0;
+      if (row.type === "income") profitByBatch[row.batch_id] = (profitByBatch[row.batch_id] ?? 0) + amt;
+      else if (row.type === "expense") profitByBatch[row.batch_id] = (profitByBatch[row.batch_id] ?? 0) - amt;
+    });
     setBatches(
       list.map((b) => ({
         ...b,
@@ -154,12 +164,13 @@ export default function BusinessProjectDetailScreen() {
       setFriends([]);
       return;
     }
-    const { data: profs } = await supabase.from("profiles").select("id, username, display_name").in("id", [...ids]);
+    const { data: profs } = await supabase.from("profiles").select("id, username, display_name, avatar_url").in("id", [...ids]);
     setFriends(
-      (profs ?? []).map((p: { id: string; username: string; display_name?: string | null }) => ({
+      (profs ?? []).map((p: { id: string; username: string; display_name?: string | null; avatar_url?: string | null }) => ({
         id: p.id,
-        username: p.username,
+        username: p.username ?? "",
         display_name: p.display_name ?? null,
+        avatar_url: p.avatar_url ?? null,
       }))
     );
   }, [user?.id]);
@@ -197,6 +208,7 @@ export default function BusinessProjectDetailScreen() {
 
   const openAddMembers = () => {
     setSelectedProjectMemberIds([]);
+    setAddMemberSearchQuery("");
     setAddMembersVisible(true);
     loadFriends();
   };
@@ -236,7 +248,7 @@ export default function BusinessProjectDetailScreen() {
             Alert.alert("Error", error.message);
             return;
           }
-          router.replace("/(tabs)/history");
+          router.back();
         },
       },
     ]);
@@ -287,7 +299,7 @@ export default function BusinessProjectDetailScreen() {
             Alert.alert("Error", error.message);
             return;
           }
-          router.replace("/(tabs)/history");
+          router.back();
         },
       },
     ]);
@@ -299,7 +311,7 @@ export default function BusinessProjectDetailScreen() {
     <SafeAreaView style={styles.container} edges={["top", "left", "right", "bottom"]}>
       <StatusBar style="light" />
       <View style={styles.header}>
-        <Pressable onPress={() => router.replace("/(tabs)/history")} style={({ pressed }) => [styles.backBtn, pressed && styles.pressed]} hitSlop={12}>
+        <Pressable onPress={() => router.back()} style={({ pressed }) => [styles.backBtn, pressed && styles.pressed]} hitSlop={12}>
           <Ionicons name="arrow-back" size={24} color="#e5e5e5" />
         </Pressable>
         <View style={styles.headerText}>
@@ -336,7 +348,10 @@ export default function BusinessProjectDetailScreen() {
                   <Text style={styles.batchDate}>{formatBatchDate(b.created_at)}</Text>
                 </View>
                 <View style={styles.batchCardRight}>
-                  <Text style={styles.batchProfit}>{formatAmount(b.profit, currencyCode)}</Text>
+                  <View style={styles.batchProfitBlock}>
+                    <Text style={styles.batchProfitLabel}>Total profit</Text>
+                    <Text style={styles.batchProfit}>{formatAmount(b.profit, currencyCode)}</Text>
+                  </View>
                   <Ionicons name="chevron-forward" size={20} color="#737373" />
                 </View>
               </Pressable>
@@ -384,23 +399,66 @@ export default function BusinessProjectDetailScreen() {
           <Pressable style={[styles.modalCard, styles.modalCardWide]} onPress={() => {}}>
             <ScrollView showsVerticalScrollIndicator={false}>
               <Text style={styles.modalTitle}>Add members</Text>
-              <Text style={styles.modalSub}>Added users can view all batches and leave the project.</Text>
+              <Text style={styles.modalSub}>Search and select friends to add to this project.</Text>
+              <View style={styles.addMemberSearchWrap}>
+                <Ionicons name="search" size={18} color="#737373" style={styles.addMemberSearchIcon} />
+                <TextInput
+                  style={styles.addMemberSearchInput}
+                  value={addMemberSearchQuery}
+                  onChangeText={setAddMemberSearchQuery}
+                  placeholder="Search by name or username…"
+                  placeholderTextColor="#525252"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+                {addMemberSearchQuery.length > 0 ? (
+                  <Pressable onPress={() => setAddMemberSearchQuery("")} style={styles.addMemberSearchClear} hitSlop={8}>
+                    <Ionicons name="close-circle" size={20} color="#737373" />
+                  </Pressable>
+                ) : null}
+              </View>
               <View style={styles.memberList}>
                 {(() => {
                   const currentIds = batches[0]?.member_ids ?? [];
                   const addable = friends.filter((f) => !currentIds.includes(f.id));
+                  const searchLower = addMemberSearchQuery.trim().toLowerCase();
+                  const filtered = searchLower
+                    ? addable.filter(
+                        (f) =>
+                          (f.display_name && f.display_name.toLowerCase().includes(searchLower)) ||
+                          (f.username && f.username.toLowerCase().includes(searchLower))
+                      )
+                    : addable;
                   if (addable.length === 0) {
                     return <Text style={styles.memberEmpty}>No friends to add, or all are already in the project.</Text>;
                   }
-                  return addable.map((f) => {
+                  if (filtered.length === 0) {
+                    return <Text style={styles.memberEmpty}>No matches for "{addMemberSearchQuery.trim()}".</Text>;
+                  }
+                  return filtered.map((f) => {
                     const selected = selectedProjectMemberIds.includes(f.id);
+                    const displayName = (f.display_name && f.display_name.trim()) || f.username || "—";
                     return (
                       <Pressable
                         key={f.id}
                         style={[styles.memberRow, selected && styles.memberRowSelected]}
                         onPress={() => toggleProjectMember(f.id)}
                       >
-                        <Text style={styles.memberName}>{(f.display_name && f.display_name.trim()) || f.username}</Text>
+                        <View style={styles.memberRowLeft}>
+                          <View style={styles.memberAvatarWrap}>
+                            {f.avatar_url ? (
+                              <Image source={{ uri: f.avatar_url }} style={styles.memberAvatarImg} />
+                            ) : (
+                              <View style={styles.memberAvatarPlaceholder}>
+                                <Text style={styles.memberAvatarLetter}>{(f.username || "?").charAt(0).toUpperCase()}</Text>
+                              </View>
+                            )}
+                          </View>
+                          <View style={styles.memberNameBlock}>
+                            <Text style={styles.memberName}>{displayName}</Text>
+                            <Text style={styles.memberUsername}>@{f.username || ""}</Text>
+                          </View>
+                        </View>
                         {selected ? <Ionicons name="checkmark-circle" size={22} color="#8DEB63" /> : <View style={styles.memberCheckEmpty} />}
                       </Pressable>
                     );
@@ -456,7 +514,7 @@ export default function BusinessProjectDetailScreen() {
               </>
             ) : (
               <>
-                <Text style={styles.modalSub}>You can leave this project. You will no longer see it in history.</Text>
+                <Text style={styles.modalSub}>You can leave this project. You will no longer see it in Manage.</Text>
                 <Pressable style={styles.leaveProjectBtn} onPress={handleLeaveProject} disabled={leavingProject}>
                   <Ionicons name="exit-outline" size={20} color="#f97373" />
                   <Text style={styles.leaveProjectBtnText}>{leavingProject ? "Leaving…" : "Leave project"}</Text>
@@ -507,7 +565,9 @@ const styles = StyleSheet.create({
   batchAvatarPlaceholder: { width: 28, height: 28, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(141,235,99,0.2)" },
   batchAvatarLetter: { color: "#8DEB63", fontSize: 12, fontWeight: "700" },
   batchCardRight: { flexDirection: "row", alignItems: "center", gap: 8 },
-  batchProfit: { color: "#8DEB63", fontSize: 15, fontWeight: "700" },
+  batchProfitBlock: { alignItems: "flex-end" },
+  batchProfitLabel: { color: "#737373", fontSize: 11, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.5 },
+  batchProfit: { color: "#8DEB63", fontSize: 15, fontWeight: "700", marginTop: 2 },
   fab: {
     position: "absolute",
     bottom: 24,
@@ -540,6 +600,10 @@ const styles = StyleSheet.create({
   },
   memberList: { marginBottom: 20 },
   memberEmpty: { color: "#737373", fontSize: 14 },
+  addMemberSearchWrap: { flexDirection: "row", alignItems: "center", backgroundColor: "#141414", borderRadius: 12, marginBottom: 16, paddingHorizontal: 12, borderWidth: 1, borderColor: "rgba(255,255,255,0.08)" },
+  addMemberSearchIcon: { marginRight: 8 },
+  addMemberSearchInput: { flex: 1, color: "#fff", fontSize: 16, paddingVertical: 12, minHeight: 44 },
+  addMemberSearchClear: { padding: 4 },
   memberRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -553,7 +617,14 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.06)",
   },
   memberRowSelected: { backgroundColor: "rgba(141,235,99,0.12)", borderColor: "rgba(141,235,99,0.3)" },
-  memberName: { color: "#e5e5e5", fontSize: 15 },
+  memberRowLeft: { flexDirection: "row", alignItems: "center", flex: 1, minWidth: 0, marginRight: 12 },
+  memberAvatarWrap: { width: 40, height: 40, borderRadius: 20, overflow: "hidden", backgroundColor: "rgba(255,255,255,0.1)", marginRight: 12 },
+  memberAvatarImg: { width: 40, height: 40 },
+  memberAvatarPlaceholder: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(141,235,99,0.2)" },
+  memberAvatarLetter: { color: "#8DEB63", fontSize: 16, fontWeight: "700" },
+  memberNameBlock: { flex: 1, minWidth: 0 },
+  memberName: { color: "#e5e5e5", fontSize: 15, fontWeight: "600" },
+  memberUsername: { color: "#737373", fontSize: 13, marginTop: 2 },
   memberCheckEmpty: { width: 22, height: 22 },
   modalActions: { flexDirection: "row", gap: 12, marginTop: 8 },
   modalBtn: { flex: 1, paddingVertical: 14, borderRadius: 14, alignItems: "center" },

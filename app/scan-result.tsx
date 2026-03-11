@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View, Image } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
@@ -11,6 +11,229 @@ import { supabase } from "./lib/supabase";
 import { formatAmount, getCurrency } from "./lib/currency";
 
 const RECEIPT_IMAGES_BUCKET = "receipt-images";
+
+const TOTALS_TOLERANCE = 0.02;
+
+function parseNum(s: string | undefined | null): number {
+  if (s == null || String(s).trim() === "") return 0;
+  const n = parseFloat(String(s).trim().replace(/,/g, "."));
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+const MAX_SET_COMPONENTS_AFTER_SET = 4;
+const SET_COMPONENT_MAX_PRICE = 15;
+
+function priceKey(p: number): string {
+  return (Math.round(p * 100) / 100).toFixed(2);
+}
+
+function isSetSubItemByPosition(
+  items: { name?: string; price?: string }[],
+  index: number,
+  priceTotalCount: Map<string, number>,
+  zeroableRankByIndex: Map<number, number>
+): boolean {
+  if (index <= 0) return false;
+  const item = items[index];
+  const name = (item?.name || "").trim();
+  if (name.toLowerCase().includes("(set)")) return false;
+  const price = parseFloat(item?.price || "0") || 0;
+  if (price >= SET_COMPONENT_MAX_PRICE) return false;
+  const totalForPrice = priceTotalCount.get(priceKey(price)) ?? 0;
+  if (totalForPrice <= 1) return false;
+  let lastSetIndex = -1;
+  for (let i = index - 1; i >= 0; i--) {
+    if ((items[i]?.name || "").toLowerCase().includes("(set)")) {
+      lastSetIndex = i;
+      break;
+    }
+  }
+  if (lastSetIndex < 0) return false;
+  const distanceFromSet = index - lastSetIndex - 1;
+  if (distanceFromSet >= MAX_SET_COMPONENTS_AFTER_SET) return false;
+  for (let i = lastSetIndex + 1; i < index; i++) {
+    if ((items[i]?.name || "").toLowerCase().includes("(set)")) return false;
+  }
+  const rank = zeroableRankByIndex.get(index) ?? 0;
+  if (rank <= 0 || rank > totalForPrice - 1) return false;
+  return true;
+}
+
+function buildSetComponentMaps(items: { name?: string; price?: string }[]): {
+  priceTotalCount: Map<string, number>;
+  zeroableRankByIndex: Map<number, number>;
+} {
+  const priceTotalCount = new Map<string, number>();
+  for (const it of items) {
+    const p = parseFloat(it.price || "0") || 0;
+    const k = priceKey(p);
+    priceTotalCount.set(k, (priceTotalCount.get(k) ?? 0) + 1);
+  }
+  const zeroableIndices: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const name = (items[i]?.name || "").trim();
+    if (name.toLowerCase().includes("(set)")) continue;
+    const price = parseFloat(items[i]?.price || "0") || 0;
+    if (price >= SET_COMPONENT_MAX_PRICE) continue;
+    let lastSetIndex = -1;
+    for (let j = i - 1; j >= 0; j--) {
+      if ((items[j]?.name || "").toLowerCase().includes("(set)")) {
+        lastSetIndex = j;
+        break;
+      }
+    }
+    if (lastSetIndex < 0) continue;
+    const distanceFromSet = i - lastSetIndex - 1;
+    if (distanceFromSet >= MAX_SET_COMPONENTS_AFTER_SET) continue;
+    let hasSetBetween = false;
+    for (let j = lastSetIndex + 1; j < i; j++) {
+      if ((items[j]?.name || "").toLowerCase().includes("(set)")) {
+        hasSetBetween = true;
+        break;
+      }
+    }
+    if (hasSetBetween) continue;
+    zeroableIndices.push(i);
+  }
+  const zeroableRankByIndex = new Map<number, number>();
+  const priceToZeroableIndices = new Map<string, number[]>();
+  for (const i of zeroableIndices) {
+    const p = priceKey(parseFloat(items[i]?.price || "0") || 0);
+    if (!priceToZeroableIndices.has(p)) priceToZeroableIndices.set(p, []);
+    priceToZeroableIndices.get(p)!.push(i);
+  }
+  for (const [, indices] of priceToZeroableIndices) {
+    indices.sort((a, b) => a - b);
+    indices.forEach((idx, rank) => {
+      zeroableRankByIndex.set(idx, rank + 1);
+    });
+  }
+  return { priceTotalCount, zeroableRankByIndex };
+}
+
+function isSetSubItem(item: { name?: string; price?: string }, prevItem?: { name?: string; price?: string }): boolean {
+  const name = (item.name || "").trim();
+  if (/^[-•–—]\s*/.test(name) || name.startsWith("+ ")) return true;
+  if (prevItem && (prevItem.name || "").toLowerCase().includes("(set)")) {
+    const prevPrice = parseFloat(prevItem.price || "0") || 0;
+    const thisPrice = parseFloat(item.price || "0") || 0;
+    if (Math.abs(prevPrice - thisPrice) < TOTALS_TOLERANCE) return true;
+  }
+  return false;
+}
+
+function getSubtotalFromItems(items: { name?: string; price?: string }[]): number {
+  const { priceTotalCount, zeroableRankByIndex } = buildSetComponentMaps(items);
+  return items.reduce((sum, item, i) => {
+    const price = parseFloat(item.price || "0") || 0;
+    const subByPos = isSetSubItemByPosition(items, i, priceTotalCount, zeroableRankByIndex);
+    const subByPrev = isSetSubItem(item, items[i - 1]);
+    if (subByPos || subByPrev) return sum;
+    return sum + price;
+  }, 0);
+}
+
+function normalizeReceiptItems(items: { name?: string; qty?: number; price?: string }[]): { name?: string; qty?: number; price?: string }[] {
+  const { priceTotalCount, zeroableRankByIndex } = buildSetComponentMaps(items);
+  return items.map((item, i) => {
+    const price = parseFloat(item.price || "0") || 0;
+    const subByPos = isSetSubItemByPosition(items, i, priceTotalCount, zeroableRankByIndex);
+    const subByPrev = isSetSubItem(item, items[i - 1]);
+    if ((subByPos || subByPrev) && price > 0) return { ...item, price: "0" };
+    return item;
+  });
+}
+
+function runReceiptCrossCheck(
+  params: { total?: string; tax?: string; serviceCharge?: string; otherCharges?: string; items?: string },
+  setters: { setTax: (v: string) => void; setServiceCharge: (v: string) => void; setOtherCharges: (v: string) => void },
+  normalizedItems?: { name?: string; price?: string }[]
+): void {
+  const items: { name?: string; price?: string }[] =
+    normalizedItems && normalizedItems.length > 0
+      ? normalizedItems
+      : (() => {
+          try {
+            return params.items ? (JSON.parse(params.items) as { name?: string; price?: string }[]) : [];
+          } catch {
+            return [];
+          }
+        })();
+  const subtotal = Math.round(getSubtotalFromItems(items) * 100) / 100;
+  const total = parseNum(params.total);
+  if (total <= 0) return;
+
+  const tax = parseNum(params.tax);
+  const hadExplicitTax =
+    params.tax != null &&
+    String(params.tax).trim() !== "" &&
+    parseNum(params.tax) > 0;
+  const service = parseNum(params.serviceCharge);
+  const other = parseNum(params.otherCharges);
+  const chargesSum = tax + service + other;
+
+  // Only correct when cross-check fails: if scanned totals already match, do not extrapolate.
+  const sumWithCharges = Math.round((subtotal + chargesSum) * 100) / 100;
+  if (Math.abs(sumWithCharges - total) <= TOTALS_TOLERANCE) return;
+
+  const remainder = Math.round((total - subtotal) * 100) / 100;
+  if (remainder < -TOTALS_TOLERANCE) {
+    setters.setTax("0");
+    setters.setServiceCharge("0");
+    setters.setOtherCharges("0");
+    return;
+  }
+  if (remainder >= -TOTALS_TOLERANCE && remainder <= TOTALS_TOLERANCE) return;
+
+  // No specific tax on receipt: if service+other explains remainder, never include tax.
+  const servicePlusOther = service + other;
+  if (servicePlusOther >= remainder - TOTALS_TOLERANCE && servicePlusOther <= remainder + TOTALS_TOLERANCE) {
+    setters.setTax("0");
+    setters.setServiceCharge(service.toFixed(2));
+    setters.setOtherCharges(other.toFixed(2));
+    return;
+  }
+
+  if (chargesSum <= 0) {
+    setters.setTax("0");
+    setters.setServiceCharge(remainder.toFixed(2));
+    setters.setOtherCharges("0");
+    return;
+  }
+  if (chargesSum > remainder + TOTALS_TOLERANCE) {
+    if (servicePlusOther >= remainder - TOTALS_TOLERANCE) {
+      setters.setTax("0");
+      if (servicePlusOther > 0) {
+        const r = remainder / servicePlusOther;
+        const newService = Math.round(service * r * 100) / 100;
+        const newOther = Math.round((remainder - newService) * 100) / 100;
+        setters.setServiceCharge(newService.toFixed(2));
+        setters.setOtherCharges(newOther.toFixed(2));
+      } else {
+        setters.setServiceCharge(remainder.toFixed(2));
+        setters.setOtherCharges("0");
+      }
+      return;
+    }
+    const ratio = remainder / chargesSum;
+    const newTax = hadExplicitTax ? Math.round(tax * ratio * 100) / 100 : 0;
+    const newService = Math.round(service * ratio * 100) / 100;
+    const newOther = Math.round((remainder - newTax - newService) * 100) / 100;
+    setters.setTax(newTax.toFixed(2));
+    setters.setServiceCharge(newService.toFixed(2));
+    setters.setOtherCharges(newOther.toFixed(2));
+    return;
+  }
+  if (chargesSum < remainder - TOTALS_TOLERANCE) {
+    const shortfall = Math.round((remainder - chargesSum) * 100) / 100;
+    if (service + other > 0) {
+      setters.setServiceCharge((service + shortfall).toFixed(2));
+    } else {
+      const newTax = hadExplicitTax ? tax + shortfall : 0;
+      setters.setTax(newTax.toFixed(2));
+    }
+  }
+}
 
 async function uploadReceiptImage(imageUri: string, userId: string, receiptId: string): Promise<string | null> {
   try {
@@ -90,8 +313,7 @@ export default function ScanResultScreen() {
   });
 
   const calculatedTotalFromItems = useMemo(
-    () =>
-      items.reduce((sum, item) => sum + (parseFloat(item.price || "0") || 0), 0).toFixed(2),
+    () => getSubtotalFromItems(items).toFixed(2),
     [items]
   );
 
@@ -119,6 +341,36 @@ export default function ScanResultScreen() {
   const [imageEnlargeVisible, setImageEnlargeVisible] = useState(false);
   const insets = useSafeAreaInsets();
   const hasAssignedMembers = Object.values(assignments).some((memberIndexes) => memberIndexes.length > 0);
+  const crossCheckDoneRef = useRef(false);
+
+  useEffect(() => {
+    if (isEditMode || crossCheckDoneRef.current) return;
+    if (!params.total && !params.items) return;
+    crossCheckDoneRef.current = true;
+    let parsed: ResultItem[] = [];
+    try {
+      parsed = params.items ? (JSON.parse(params.items) as ResultItem[]) : [];
+    } catch {
+      /* no-op */
+    }
+    let normalized: ResultItem[] = parsed;
+    if (parsed.length > 0) {
+      normalized = normalizeReceiptItems(parsed);
+      const changed = normalized.some((item, i) => item.price !== (parsed[i]?.price ?? ""));
+      if (changed) setItems(normalized);
+    }
+    runReceiptCrossCheck(
+      {
+        total: params.total,
+        tax: params.tax,
+        serviceCharge: params.serviceCharge,
+        otherCharges: params.otherCharges,
+        items: params.items,
+      },
+      { setTax, setServiceCharge, setOtherCharges },
+      normalized.length > 0 ? normalized : undefined
+    );
+  }, [isEditMode, params.total, params.tax, params.serviceCharge, params.otherCharges, params.items]);
 
   const loadReceiptForEdit = useCallback(async () => {
     if (!receiptId || !user?.id) return;
@@ -241,21 +493,30 @@ export default function ScanResultScreen() {
     }
   }, [isManualMode]);
 
+  // Default to host (initiator) on any new scan when no members yet; edit mode loads members from receipt.
   useEffect(() => {
-    if (isRestaurantOrGroceriesManual && members.length === 0 && profile?.username) {
+    if (!receiptId && members.length === 0 && profile?.username) {
       setMembers([{ username: profile.username, avatar_url: profile.avatar_url ?? null }]);
     }
-  }, [isRestaurantOrGroceriesManual, members.length, profile?.username, profile?.avatar_url]);
+  }, [receiptId, members.length, profile?.username, profile?.avatar_url]);
+
+  const addMemberOptions = useMemo(() => {
+    const host =
+      user?.id && profile?.username
+        ? { id: user.id, username: profile.username, display_name: profile.display_name ?? null, avatar_url: profile.avatar_url ?? null }
+        : null;
+    return host ? [host, ...friendsList] : [...friendsList];
+  }, [user?.id, profile?.username, profile?.display_name, profile?.avatar_url, friendsList]);
 
   const filteredFriends = useMemo(() => {
     const q = friendSearchQuery.trim().toLowerCase();
-    if (!q) return friendsList;
-    return friendsList.filter(
+    if (!q) return addMemberOptions;
+    return addMemberOptions.filter(
       (f) =>
         f.username.toLowerCase().includes(q) ||
         (f.display_name || "").toLowerCase().includes(q)
     );
-  }, [friendsList, friendSearchQuery]);
+  }, [addMemberOptions, friendSearchQuery]);
 
   const splitTotals = useMemo(() => {
     const baseTotals = new Array(members.length).fill(0);
@@ -281,7 +542,7 @@ export default function ScanResultScreen() {
 
     // Tax, service charge, and other charges are always split evenly among members.
     if (!isManualMode && members.length > 0) {
-      const itemsSubtotal = items.reduce((sum, item) => sum + (parseFloat(item.price || "0") || 0), 0);
+      const itemsSubtotal = getSubtotalFromItems(items);
       const effectiveTotal = isRestaurantOrGroceriesManual ? calculatedTotalFromItems : total;
       const receiptTotal = parseFloat(effectiveTotal || "0") || 0;
       const taxValue = tax.trim() ? parseFloat(tax) : Math.max(0, receiptTotal - itemsSubtotal);
@@ -934,7 +1195,9 @@ export default function ScanResultScreen() {
           <Pressable style={styles.enlargeOverlay} onPress={() => setImageEnlargeVisible(false)}>
             <View style={styles.enlargeContent} pointerEvents="box-none">
               {imageUri ? (
-                <Image source={{ uri: imageUri }} style={styles.enlargeImage} resizeMode="contain" pointerEvents="none" />
+                <View style={styles.enlargeImageWrap} pointerEvents="none">
+                  <Image source={{ uri: imageUri }} style={styles.enlargeImage} resizeMode="contain" />
+                </View>
               ) : null}
             </View>
             <Pressable style={[styles.enlargeCloseBtn, { top: insets.top + 8 }]} onPress={() => setImageEnlargeVisible(false)} hitSlop={16}>
@@ -1347,7 +1610,7 @@ export default function ScanResultScreen() {
                   <Ionicons name="person-add-outline" size={22} color="#8DEB63" />
                   <Text style={styles.modalTitle}>Add member</Text>
                 </View>
-                <Text style={styles.modalHint}>Search by username. Only friends can be added.</Text>
+                <Text style={styles.modalHint}>Add yourself or search friends by username.</Text>
                 <View style={styles.friendSearchWrap}>
                   <Ionicons name="search" size={18} color="#737373" style={styles.friendSearchIcon} />
                   <TextInput
@@ -1363,7 +1626,7 @@ export default function ScanResultScreen() {
                 <ScrollView style={styles.friendListScroll} nestedScrollEnabled>
                   {filteredFriends.length === 0 ? (
                     <Text style={styles.modalHint}>
-                      {friendsList.length === 0 ? "No friends yet. Add friends from the Friends tab." : "No matching username."}
+                      {addMemberOptions.length === 0 ? "Add friends from the Friends tab to add them here." : "No matching username."}
                     </Text>
                   ) : (
                     filteredFriends.map((f) => {
@@ -1444,7 +1707,8 @@ const styles = StyleSheet.create({
 
   enlargeOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.92)", justifyContent: "center", alignItems: "center" },
   enlargeContent: { flex: 1, width: "100%", justifyContent: "center", paddingHorizontal: 16 },
-  enlargeImage: { width: "100%", height: "85%", alignSelf: "center" },
+  enlargeImageWrap: { width: "100%", height: "85%", alignSelf: "center" },
+  enlargeImage: { width: "100%", height: "100%" },
   enlargeCloseBtn: { position: "absolute", top: 50, right: 20, width: 44, height: 44, borderRadius: 22, backgroundColor: "rgba(255,255,255,0.15)", alignItems: "center", justifyContent: "center" },
 
   accent: { height: 4, backgroundColor: "#8DEB63", marginBottom: 16 },

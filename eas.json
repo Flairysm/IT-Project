@@ -34,5 +34,12 @@
         "NPM_CONFIG_LEGACY_PEER_DEPS": "true"
       }
     }
+  },
+  "submit": {
+    "production": {
+      "android": {
+        "serviceAccountKeyPath": "/Users/bryant/Downloads/ezsplit-489910-c5415c9167c7.json"
+      }
+    }
   }
 }

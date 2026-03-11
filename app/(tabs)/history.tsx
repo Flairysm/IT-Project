@@ -378,7 +378,14 @@ export default function HistoryTabScreen() {
       if (!user?.id) return;
       try {
         const { error: e } = await supabase.from("receipts").delete().eq("id", id).eq("host_id", user.id);
-        if (e) throw new Error(e.message);
+        if (e) {
+          const msg = e.message ?? "";
+          if (msg.includes("PGRST116") || msg.toLowerCase().includes("not found") || msg.toLowerCase().includes("0 rows")) {
+            setRows((prev) => prev.filter((r) => r.id !== id));
+            return;
+          }
+          throw new Error(e.message);
+        }
         setRows((prev) => prev.filter((r) => r.id !== id));
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to delete");
@@ -388,7 +395,7 @@ export default function HistoryTabScreen() {
   );
 
   const confirmDelete = (row: HistoryRow) => {
-    Alert.alert("Delete receipt", `Remove "${row.merchant || "this receipt"}" from history?`, [
+    Alert.alert("Delete receipt", `Remove "${row.merchant || "this receipt"}" from your list?`, [
       { text: "Cancel", style: "cancel" },
       { text: "Delete", style: "destructive", onPress: () => void deleteReceipt(row.id) },
     ]);
@@ -406,14 +413,14 @@ export default function HistoryTabScreen() {
         <View style={styles.accent} />
         <View style={styles.header}>
           <View>
-            <Text style={styles.title}>History</Text>
-            <Text style={styles.subtitle}>Your receipt history</Text>
+            <Text style={styles.title}>Manage</Text>
+            <Text style={styles.subtitle}>Receipts, trips & business projects</Text>
           </View>
           <SubscriptionDiamond />
         </View>
 
         <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>History</Text>
+          <Text style={styles.sectionTitle}>Recent</Text>
           <View style={styles.settlementTabRow}>
             <Pressable style={[styles.settlementTab, categoryTab === "all" && styles.settlementTabActive]} onPress={() => setCategoryTab("all")}>
               <Ionicons name="apps-outline" size={16} color={categoryTab === "all" ? "#8DEB63" : "#737373"} />
@@ -473,16 +480,30 @@ export default function HistoryTabScreen() {
           ) : !historyListItems.length ? (
             <View style={styles.emptyState}>
               <View style={styles.emptyIconWrap}>
-                <Ionicons name="receipt-outline" size={44} color="#525252" />
+                <Ionicons name={search.trim() || categoryTab !== "all" ? "filter-outline" : "receipt-outline"} size={44} color="#525252" />
               </View>
               <Text style={styles.emptyTitle}>
-                {categoryTab !== "all"
-                  ? `Nothing in ${QUICK_SPLIT_CATEGORIES.find((c) => c.id === categoryTab)?.label ?? categoryTab}`
-                  : "No history yet"}
+                {rows.length > 0 || expenseGroups.length > 0 || businessProjects.length > 0
+                  ? "No results match your filters"
+                  : categoryTab !== "all"
+                    ? `Nothing in ${QUICK_SPLIT_CATEGORIES.find((c) => c.id === categoryTab)?.label ?? categoryTab}`
+                    : "Nothing to show yet"}
               </Text>
               <Text style={styles.emptySub}>
-                {categoryTab !== "all" ? "Try another category or add from Home." : "Scan a receipt or create a trip from Home."}
+                {rows.length > 0 || expenseGroups.length > 0 || businessProjects.length > 0
+                  ? "Try another category or search, or clear filters."
+                  : categoryTab !== "all"
+                    ? "Try another category or add from Home."
+                    : "Scan a receipt or create a trip from Home."}
               </Text>
+              {(search.trim() || categoryTab !== "all") ? (
+                <Pressable
+                  style={({ pressed }) => [styles.clearFiltersBtn, pressed && styles.pressed]}
+                  onPress={() => { setSearch(""); setCategoryTab("all"); setSearchFocused(false); }}
+                >
+                  <Text style={styles.clearFiltersBtnText}>Clear filters</Text>
+                </Pressable>
+              ) : null}
             </View>
           ) : (
             <>
@@ -813,6 +834,8 @@ const styles = StyleSheet.create({
   },
   emptyTitle: { color: "#e5e5e5", fontSize: 18, fontWeight: "700", marginBottom: 8 },
   emptySub: { color: "#737373", fontSize: 14, textAlign: "center" },
+  clearFiltersBtn: { marginTop: 20, paddingVertical: 12, paddingHorizontal: 20, borderRadius: 12, backgroundColor: "rgba(141,235,99,0.15)", borderWidth: 1, borderColor: "rgba(141,235,99,0.35)" },
+  clearFiltersBtnText: { color: "#8DEB63", fontSize: 15, fontWeight: "700" },
   cardList: {
     borderRadius: 16,
     backgroundColor: "#141414",

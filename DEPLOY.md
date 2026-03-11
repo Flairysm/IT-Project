@@ -93,7 +93,7 @@ Your project already has **production** and **preview** profiles in `eas.json` w
    ```bash
    cd "/Users/bryant/Documents/IT Project"
    eas build --platform ios --profile production
-  r
+  eas submit --platform ios 
    ```
 2. First time:
    - EAS may ask to create the project or link to an existing one; confirm.
@@ -177,6 +177,47 @@ Then run the build again (or use the same command; EAS injects secrets into the 
 - **Faster scanning (aim for 5–10s):** (1) Set `OPENAI_API_KEY` on the **Singapore** Render service so the server uses GPT-4 Vision (much faster than Tesseract). (2) Keep the service warm: on Render free tier, the first request after idle can take **30–60s** (cold start). Use a free cron (e.g. [cron-job.org](https://cron-job.org) or [UptimeRobot](https://uptimerobot.com)) to hit `GET https://ezsplit-ocr-sg.onrender.com/health` every 10–14 minutes. (3) The app resizes and compresses images before upload—both help speed.
 - **Notifications**: Users enable them in the app (Settings → Notifications). Reminders work if APNs was set up (EAS usually does this when you built with “Let EAS handle it” and allowed push).
 - **Updates**: Change version in `app.json` if needed, then run `eas build --platform ios --profile production` again and submit a new build in App Store Connect.
+
+---
+
+## First-time Google Play (Android) submission
+
+Google Play **requires the first version of your app to be uploaded manually** via Play Console. After that, `eas submit --platform android --latest` works for all future releases.
+
+1. **Download the AAB** from EAS:
+   - Go to [expo.dev](https://expo.dev) → your project → **Builds**.
+   - Open your latest **Android production** build (e.g. App version 1.0.5, Version code 2).
+   - Click **Download** and save the `.aab` file.
+
+2. **Open [Google Play Console](https://play.google.com/console)** and select your app (EZSplit).
+
+3. **Create the first release:**
+   - In the left menu go to **Release** → **Production** (or **Testing** → **Internal testing** to test first).
+   - Click **Create new release**.
+   - Under **App integrity**, if asked about the signing key, choose **Use the key that EAS created** (your build is already signed by EAS). If Play asks you to create a new key, choose **Google-generated key** only if you have no existing key; EAS builds are already signed.
+   - Under **App bundles**, click **Upload** and select the `.aab` file you downloaded.
+   - Add **Release name** (e.g. `1.0.5 (2)`) and **Release notes**, then click **Save** → **Review release** → **Start rollout to Production** (or **Save and publish** for internal testing).
+
+4. **Complete any remaining Play Console tasks** (store listing, privacy policy, content rating, etc.) so the release can go live.
+
+5. **From the next version onward**, you can use:
+   ```bash
+   eas submit --platform android --latest
+   ```
+   and EAS will upload to Play automatically.
+
+### If EAS Submit says "service account is missing the necessary permissions"
+
+1. Open [Google Play Console](https://play.google.com/console) and sign in.
+2. Click the **Settings** gear (bottom left) → **API access** (under "Developer account").
+3. Under **Service accounts**, find your account (e.g. `ezsplit-play-upload@ezsplit-489910.iam.gserviceaccount.com`).
+4. Click **Manage Play Console permissions** (or the account name).
+5. Under **App permissions**, click **Add app** and select **EZSplit** (or your app).
+6. For that app, grant at least:
+   - **Release to production** (or **Manage production releases**)
+   - **Release to testing tracks** (or **Manage testing track releases**) if you use internal/closed testing
+   Or choose **Admin (all permissions)** for that app to avoid permission errors.
+7. Click **Save changes**. Wait a few minutes, then run `eas submit --platform android --latest` again.
 
 ---
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Alert,
+  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -19,8 +20,9 @@ export default function BusinessNewBatchScreen() {
   const router = useRouter();
   const { user } = useAuth();
   const [batchName, setBatchName] = useState("");
-  const [friends, setFriends] = useState<{ id: string; username: string; display_name?: string | null }[]>([]);
+  const [friends, setFriends] = useState<{ id: string; username: string; display_name?: string | null; avatar_url?: string | null }[]>([]);
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
+  const [memberSearchQuery, setMemberSearchQuery] = useState("");
   const [saving, setSaving] = useState(false);
 
   const loadFriends = useCallback(async () => {
@@ -36,12 +38,13 @@ export default function BusinessNewBatchScreen() {
       setFriends([]);
       return;
     }
-    const { data: profs } = await supabase.from("profiles").select("id, username, display_name").in("id", [...ids]);
+    const { data: profs } = await supabase.from("profiles").select("id, username, display_name, avatar_url").in("id", [...ids]);
     setFriends(
-      (profs ?? []).map((p: { id: string; username: string; display_name?: string | null }) => ({
+      (profs ?? []).map((p: { id: string; username: string; display_name?: string | null; avatar_url?: string | null }) => ({
         id: p.id,
-        username: p.username,
+        username: p.username ?? "",
         display_name: p.display_name ?? null,
+        avatar_url: p.avatar_url ?? null,
       }))
     );
   }, [user?.id]);
@@ -101,25 +104,68 @@ export default function BusinessNewBatchScreen() {
         />
 
         <Text style={styles.inputLabel}>Add members</Text>
-        <Text style={styles.hintSmall}>Added users can view all batches and leave from project settings.</Text>
+        <Text style={styles.hintSmall}>Search and select friends. Added users can view all batches and leave from project settings.</Text>
+        <View style={styles.memberSearchWrap}>
+          <Ionicons name="search" size={18} color="#737373" style={styles.memberSearchIcon} />
+          <TextInput
+            style={styles.memberSearchInput}
+            value={memberSearchQuery}
+            onChangeText={setMemberSearchQuery}
+            placeholder="Search by name or username…"
+            placeholderTextColor="#525252"
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          {memberSearchQuery.length > 0 ? (
+            <Pressable onPress={() => setMemberSearchQuery("")} style={styles.memberSearchClear} hitSlop={8}>
+              <Ionicons name="close-circle" size={20} color="#737373" />
+            </Pressable>
+          ) : null}
+        </View>
         <View style={styles.memberList}>
           {friends.length === 0 ? (
             <Text style={styles.memberEmpty}>No friends yet.</Text>
-          ) : (
-            friends.map((f) => {
+          ) : (() => {
+            const searchLower = memberSearchQuery.trim().toLowerCase();
+            const filtered = searchLower
+              ? friends.filter(
+                  (f) =>
+                    (f.display_name && f.display_name.toLowerCase().includes(searchLower)) ||
+                    (f.username && f.username.toLowerCase().includes(searchLower))
+                )
+              : friends;
+            if (filtered.length === 0) {
+              return <Text style={styles.memberEmpty}>No matches for "{memberSearchQuery.trim()}".</Text>;
+            }
+            return filtered.map((f) => {
               const selected = selectedMemberIds.includes(f.id);
+              const displayName = (f.display_name && f.display_name.trim()) || f.username || "—";
               return (
                 <Pressable
                   key={f.id}
                   style={[styles.memberRow, selected && styles.memberRowSelected]}
                   onPress={() => toggleMember(f.id)}
                 >
-                  <Text style={styles.memberName}>{(f.display_name && f.display_name.trim()) || f.username}</Text>
+                  <View style={styles.memberRowLeft}>
+                    <View style={styles.memberAvatarWrap}>
+                      {f.avatar_url ? (
+                        <Image source={{ uri: f.avatar_url }} style={styles.memberAvatarImg} />
+                      ) : (
+                        <View style={styles.memberAvatarPlaceholder}>
+                          <Text style={styles.memberAvatarLetter}>{(f.username || "?").charAt(0).toUpperCase()}</Text>
+                        </View>
+                      )}
+                    </View>
+                    <View style={styles.memberNameBlock}>
+                      <Text style={styles.memberName}>{displayName}</Text>
+                      <Text style={styles.memberUsername}>@{f.username || ""}</Text>
+                    </View>
+                  </View>
                   {selected ? <Ionicons name="checkmark-circle" size={22} color="#8DEB63" /> : <View style={styles.memberCheckEmpty} />}
                 </Pressable>
               );
-            })
-          )}
+            });
+          })()}
         </View>
 
         <Pressable
@@ -130,7 +176,7 @@ export default function BusinessNewBatchScreen() {
           <Text style={styles.createBtnText}>{saving ? "Creating…" : "Create project"}</Text>
         </Pressable>
 
-        <Text style={styles.hint}>Project will appear in History → Business. Open it to add batches.</Text>
+        <Text style={styles.hint}>Project will appear in Manage → Business. Open it to add batches.</Text>
       </ScrollView>
     </SafeAreaView>
   );
@@ -168,6 +214,10 @@ const styles = StyleSheet.create({
   createBtnText: { color: "#0a0a0a", fontSize: 16, fontWeight: "800" },
   hint: { color: "#737373", fontSize: 13, marginTop: 20, textAlign: "center" },
   hintSmall: { color: "#737373", fontSize: 12, marginBottom: 10 },
+  memberSearchWrap: { flexDirection: "row", alignItems: "center", backgroundColor: "#141414", borderRadius: 12, marginBottom: 12, paddingHorizontal: 12, borderWidth: 1, borderColor: "rgba(255,255,255,0.08)" },
+  memberSearchIcon: { marginRight: 8 },
+  memberSearchInput: { flex: 1, color: "#fff", fontSize: 16, paddingVertical: 12, minHeight: 44 },
+  memberSearchClear: { padding: 4 },
   memberList: { marginBottom: 20 },
   memberEmpty: { color: "#737373", fontSize: 14 },
   memberRow: {
@@ -183,6 +233,13 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.06)",
   },
   memberRowSelected: { backgroundColor: "rgba(141,235,99,0.12)", borderColor: "rgba(141,235,99,0.3)" },
-  memberName: { color: "#e5e5e5", fontSize: 15 },
+  memberRowLeft: { flexDirection: "row", alignItems: "center", flex: 1, minWidth: 0, marginRight: 12 },
+  memberAvatarWrap: { width: 40, height: 40, borderRadius: 20, overflow: "hidden", backgroundColor: "rgba(255,255,255,0.1)", marginRight: 12 },
+  memberAvatarImg: { width: 40, height: 40 },
+  memberAvatarPlaceholder: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(141,235,99,0.2)" },
+  memberAvatarLetter: { color: "#8DEB63", fontSize: 16, fontWeight: "700" },
+  memberNameBlock: { flex: 1, minWidth: 0 },
+  memberName: { color: "#e5e5e5", fontSize: 15, fontWeight: "600" },
+  memberUsername: { color: "#737373", fontSize: 13, marginTop: 2 },
   memberCheckEmpty: { width: 22, height: 22 },
 });

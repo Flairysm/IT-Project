@@ -448,7 +448,7 @@ export default function HomeScreen() {
     };
   }, [loading]);
 
-  const processPickedImage = async (imageUri: string) => {
+  const processPickedImage = async (imageUri: string, selectedCategory: QuickSplitCategory | null = null) => {
     if (!checkRateLimit("scan", RATE_LIMIT.scan)) {
       setError("Please wait a few seconds before scanning again.");
       return;
@@ -507,7 +507,7 @@ export default function HomeScreen() {
           source: parsed?.source ?? "ocr",
           imageUri,
           items: JSON.stringify(extracted.items ?? []),
-          category: pendingScanCategory ?? "others",
+          category: selectedCategory ?? pendingScanCategory ?? "others",
         },
       });
       setPendingScanCategory(null);
@@ -519,7 +519,7 @@ export default function HomeScreen() {
     }
   };
 
-  const pickFromLibrary = async () => {
+  const pickFromLibrary = async (category: QuickSplitCategory | null = null) => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== "granted") {
       Alert.alert("Permission needed", "Allow photos permission to scan receipts.");
@@ -532,10 +532,10 @@ export default function HomeScreen() {
       base64: false,
     });
     if (pick.canceled) return;
-    await processPickedImage(pick.assets[0].uri);
+    await processPickedImage(pick.assets[0].uri, category);
   };
 
-  const takePhoto = async () => {
+  const takePhoto = async (category: QuickSplitCategory | null = null) => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
     if (status !== "granted") {
       Alert.alert("Permission needed", "Allow camera permission to take receipt photos.");
@@ -548,7 +548,7 @@ export default function HomeScreen() {
       base64: false,
     });
     if (capture.canceled) return;
-    await processPickedImage(capture.assets[0].uri);
+    await processPickedImage(capture.assets[0].uri, category);
   };
 
   const onScanPress = () => {
@@ -559,8 +559,8 @@ export default function HomeScreen() {
     setPendingScanCategory(category);
     setScanCategoryModalVisible(false);
     Alert.alert("Scan Receipt", "Choose image source", [
-      { text: "Take Photo", onPress: () => void takePhoto() },
-      { text: "Choose from Library", onPress: () => void pickFromLibrary() },
+      { text: "Take Photo", onPress: () => void takePhoto(category) },
+      { text: "Choose from Library", onPress: () => void pickFromLibrary(category) },
       { text: "Cancel", style: "cancel", onPress: () => setPendingScanCategory(null) },
     ]);
   };

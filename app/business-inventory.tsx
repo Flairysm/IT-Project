@@ -37,6 +37,18 @@ type BusinessItem = {
 };
 
 type TabId = "inventory" | "profits" | "logs";
+type LogFilterId = "all" | "added" | "sold" | "expense" | "income";
+
+type LedgerEntry = {
+  id: string;
+  batch_id: string;
+  type: "expense" | "income";
+  amount: number;
+  currency: string;
+  description: string | null;
+  date: string;
+  created_at: string;
+};
 
 export default function BusinessInventoryScreen() {
   const router = useRouter();
@@ -46,6 +58,7 @@ export default function BusinessInventoryScreen() {
 
   const [batches, setBatches] = useState<Batch[]>([]);
   const [items, setItems] = useState<BusinessItem[]>([]);
+  const [ledger, setLedger] = useState<LedgerEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<TabId>("inventory");
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(params.batchId ?? null);
@@ -54,6 +67,8 @@ export default function BusinessInventoryScreen() {
   const [soldModalVisible, setSoldModalVisible] = useState(false);
   const [datePickerVisible, setDatePickerVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [profitSearchQuery, setProfitSearchQuery] = useState("");
+  const [logFilter, setLogFilter] = useState<LogFilterId>("all");
 
   const [itemName, setItemName] = useState("");
   const [setName, setSetName] = useState("");
@@ -61,6 +76,8 @@ export default function BusinessInventoryScreen() {
   const [remarks, setRemarks] = useState("");
   const [purchasePrice, setPurchasePrice] = useState("");
   const [soldPrice, setSoldPrice] = useState("");
+  const [soldAtDate, setSoldAtDate] = useState("");
+  const [soldDatePickerVisible, setSoldDatePickerVisible] = useState(false);
   const [soldItem, setSoldItem] = useState<BusinessItem | null>(null);
   const [editSoldVisible, setEditSoldVisible] = useState(false);
   const [editSoldItem, setEditSoldItem] = useState<BusinessItem | null>(null);
@@ -71,9 +88,18 @@ export default function BusinessInventoryScreen() {
   const [deletingBatch, setDeletingBatch] = useState(false);
   const [isHost, setIsHost] = useState(true);
 
-  const loadBatches = useCallback(async () => {
-    if (!user?.id) return;
+  const [ledgerModalVisible, setLedgerModalVisible] = useState(false);
+  const [editLedgerEntry, setEditLedgerEntry] = useState<LedgerEntry | null>(null);
+  const [ledgerType, setLedgerType] = useState<"expense" | "income">("expense");
+  const [ledgerAmount, setLedgerAmount] = useState("");
+  const [ledgerDescription, setLedgerDescription] = useState("");
+  const [ledgerDate, setLedgerDate] = useState("");
+  const [ledgerDatePickerVisible, setLedgerDatePickerVisible] = useState(false);
+
+  const loadBatches = useCallback(async (): Promise<string | null> => {
+    if (!user?.id) return null;
     const batchId = params.batchId;
+    const projectId = params.projectId;
     if (batchId) {
       const { data: batchRow, error } = await supabase
         .from("business_batches")
@@ -82,26 +108,69 @@ export default function BusinessInventoryScreen() {
         .single();
       if (error || !batchRow) {
         setBatches([]);
-        return;
+        return null;
       }
       const b = batchRow as Batch & { host_id?: string };
       setIsHost(b.host_id === user.id);
       setBatches([{ id: b.id, name: b.name, created_at: b.created_at }]);
       setSelectedBatchId(b.id);
-      return;
+      return b.id;
+    }
+    if (projectId) {
+      const { data: proj, error: projErr } = await supabase
+        .from("business_projects")
+        .select("id, host_id")
+        .eq("id", projectId)
+        .single();
+      if (projErr || !proj) {
+        setBatches([]);
+        return null;
+      }
+      const projRow = proj as { id: string; host_id: string };
+      const isProjectHost = projRow.host_id === user.id;
+      if (!isProjectHost) {
+        const { data: memberRow } = await supabase
+          .from("business_project_members")
+          .select("user_id")
+          .eq("project_id", projectId)
+          .eq("user_id", user.id)
+          .maybeSingle();
+        if (!memberRow) {
+          setBatches([]);
+          return null;
+        }
+      }
+      setIsHost(isProjectHost);
+      const { data: batchList, error } = await supabase
+        .from("business_batches")
+        .select("id, name, created_at")
+        .eq("project_id", projectId)
+        .order("created_at", { ascending: false });
+      if (error) {
+        setBatches([]);
+        return null;
+      }
+      const list = (batchList ?? []) as Batch[];
+      setBatches(list);
+      const firstId = list.length > 0 ? list[0].id : null;
+      setSelectedBatchId(firstId);
+      return firstId;
     }
     const { data, error } = await supabase
       .from("business_batches")
       .select("id, name, created_at")
       .eq("host_id", user.id)
       .order("created_at", { ascending: false });
-    if (error) return;
-    setBatches((data as Batch[]) ?? []);
-    if ((data?.length ?? 0) > 0 && !selectedBatchId) setSelectedBatchId((data as Batch[])[0].id);
-  }, [user?.id, params.batchId, selectedBatchId]);
+    if (error) return null;
+    const list = (data as Batch[]) ?? [];
+    setBatches(list);
+    const firstId = list.length > 0 ? list[0].id : null;
+    if (list.length > 0 && !selectedBatchId) setSelectedBatchId(firstId);
+    return firstId;
+  }, [user?.id, params.batchId, params.projectId, selectedBatchId]);
 
-  const loadItems = useCallback(async () => {
-    const batchId = params.batchId ?? selectedBatchId;
+  const loadItems = useCallback(async (overrideBatchId?: string | null) => {
+    const batchId = overrideBatchId ?? params.batchId ?? selectedBatchId;
     if (batchId) {
       const { data: batchRow } = await supabase.from("business_batches").select("id, name").eq("id", batchId).single();
       const batchMap = batchRow ? { [batchId]: (batchRow as { name: string }).name } : {};
@@ -134,14 +203,33 @@ export default function BusinessInventoryScreen() {
     setItems(list);
   }, [user?.id, params.batchId, selectedBatchId]);
 
+  const loadLedger = useCallback(async (overrideBatchId?: string | null) => {
+    const batchId = overrideBatchId ?? params.batchId ?? selectedBatchId;
+    if (!batchId) {
+      setLedger([]);
+      return;
+    }
+    const { data, error } = await supabase
+      .from("business_ledger")
+      .select("id, batch_id, type, amount, currency, description, date, created_at")
+      .eq("batch_id", batchId)
+      .order("date", { ascending: false });
+    if (error) {
+      setLedger([]);
+      return;
+    }
+    setLedger(((data ?? []) as LedgerEntry[]).map((r) => ({ ...r, date: String(r.date).slice(0, 10) })));
+  }, [params.batchId, selectedBatchId]);
+
   useEffect(() => {
     (async () => {
       setLoading(true);
-      await loadBatches();
-      await loadItems();
+      const effectiveBatchId = await loadBatches();
+      await loadItems(effectiveBatchId);
+      await loadLedger(effectiveBatchId);
       setLoading(false);
     })();
-  }, [loadBatches, loadItems]);
+  }, [loadBatches, loadItems, loadLedger]);
 
   useEffect(() => {
     if (params.batchId && batches.some((b) => b.id === params.batchId)) setSelectedBatchId(params.batchId);
@@ -181,10 +269,51 @@ export default function BusinessInventoryScreen() {
 
   const totalCost = filteredProfits.reduce((sum, i) => sum + Number(i.purchase_price), 0);
   const totalRevenue = filteredProfits.reduce((sum, i) => sum + Number(i.sold_price ?? 0), 0);
-  const totalProfit = filteredProfits.reduce((sum, i) => sum + (Number(i.sold_price ?? 0) - Number(i.purchase_price)), 0);
+  const itemProfit = totalRevenue - totalCost;
+
+  const filteredLedger = selectedBatchId ? ledger.filter((e) => e.batch_id === selectedBatchId) : ledger;
+
+  const profitSearchLower = profitSearchQuery.trim().toLowerCase();
+  const profitSearchFilteredSold = useMemo(() => {
+    if (!profitSearchLower) return filteredProfits;
+    return filteredProfits.filter(
+      (i) =>
+        (i.item_name && i.item_name.toLowerCase().includes(profitSearchLower)) ||
+        (i.set_name && i.set_name.toLowerCase().includes(profitSearchLower)) ||
+        (i.remarks && i.remarks.toLowerCase().includes(profitSearchLower)) ||
+        (i.batch_name && i.batch_name.toLowerCase().includes(profitSearchLower))
+    );
+  }, [filteredProfits, profitSearchLower]);
+  const profitSearchFilteredLedger = useMemo(() => {
+    if (!profitSearchLower) return filteredLedger;
+    return filteredLedger.filter(
+      (e) =>
+        (e.description && e.description.toLowerCase().includes(profitSearchLower)) ||
+        (e.type === "income" && "income".includes(profitSearchLower)) ||
+        (e.type === "expense" && "expense".includes(profitSearchLower))
+    );
+  }, [filteredLedger, profitSearchLower]);
+
+  const totalIncome = filteredLedger.filter((e) => e.type === "income").reduce((s, e) => s + Number(e.amount), 0);
+  const totalExpense = filteredLedger.filter((e) => e.type === "expense").reduce((s, e) => s + Number(e.amount), 0);
+  const totalProfit = itemProfit + totalIncome - totalExpense;
+
+  const profitDisplaySold = profitSearchLower ? profitSearchFilteredSold : filteredProfits;
+  const profitDisplayLedger = profitSearchLower ? profitSearchFilteredLedger : filteredLedger;
+  const profitDisplayCost = profitDisplaySold.reduce((sum, i) => sum + Number(i.purchase_price), 0);
+  const profitDisplayRevenue = profitDisplaySold.reduce((sum, i) => sum + Number(i.sold_price ?? 0), 0);
+  const profitDisplayItemProfit = profitDisplayRevenue - profitDisplayCost;
+  const profitDisplayIncome = profitDisplayLedger.filter((e) => e.type === "income").reduce((s, e) => s + Number(e.amount), 0);
+  const profitDisplayExpense = profitDisplayLedger.filter((e) => e.type === "expense").reduce((s, e) => s + Number(e.amount), 0);
+  const profitDisplayTotal = profitDisplayItemProfit + profitDisplayIncome - profitDisplayExpense;
+
+  const inventoryTotalCost = filteredInventory.reduce((sum, i) => sum + Number(i.purchase_price), 0);
 
   const logs = useCallback(() => {
-    const entries: { type: "added" | "sold"; date: string; text: string; item: BusinessItem }[] = [];
+    type LogEntry =
+      | { type: "added" | "sold"; date: string; text: string; item: BusinessItem }
+      | { type: "expense" | "income"; date: string; text: string; ledger: LedgerEntry };
+    const entries: LogEntry[] = [];
     items.forEach((item) => {
       entries.push({
         type: "added",
@@ -201,21 +330,157 @@ export default function BusinessInventoryScreen() {
         });
       }
     });
+    ledger.forEach((l) => {
+      const label = l.description?.trim() || (l.type === "income" ? "Income" : "Expense");
+      entries.push({
+        type: l.type,
+        date: l.date + "T12:00:00.000Z",
+        text: l.type === "income" ? `Income: ${label} — ${formatAmount(l.amount, l.currency)}` : `Expense: ${label} — ${formatAmount(l.amount, l.currency)}`,
+        ledger: l,
+      });
+    });
     entries.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     return entries;
-  }, [items, currencyCode]);
+  }, [items, ledger, currencyCode]);
 
   const logEntries = logs();
-  const filteredLogsByBatch = selectedBatchId ? logEntries.filter((e) => e.item.batch_id === selectedBatchId) : logEntries;
+  const filteredLogsByBatch = selectedBatchId
+    ? logEntries.filter((e) => ("item" in e ? e.item.batch_id === selectedBatchId : e.ledger.batch_id === selectedBatchId))
+    : logEntries;
   const searchFilteredLogs = useMemo(() => {
     if (!searchLower) return filteredLogsByBatch;
     return filteredLogsByBatch.filter((e) => e.text.toLowerCase().includes(searchLower));
   }, [filteredLogsByBatch, searchLower]);
 
+  const typeFilteredLogs = useMemo(() => {
+    if (logFilter === "all") return searchFilteredLogs;
+    return searchFilteredLogs.filter((e) => e.type === logFilter);
+  }, [logFilter, searchFilteredLogs]);
+
   const openSoldModal = (item: BusinessItem) => {
     setSoldItem(item);
     setSoldPrice("");
+    setSoldAtDate(getTodayISO());
+    setSoldDatePickerVisible(false);
     setSoldModalVisible(true);
+  };
+
+  const openLedgerModal = (type: "expense" | "income") => {
+    setEditLedgerEntry(null);
+    setLedgerType(type);
+    setLedgerAmount("");
+    setLedgerDescription("");
+    setLedgerDate(getTodayISO());
+    setLedgerDatePickerVisible(false);
+    setLedgerModalVisible(true);
+  };
+
+  const openEditLedgerModal = (entry: LedgerEntry) => {
+    setEditLedgerEntry(entry);
+    setLedgerType(entry.type);
+    setLedgerAmount(String(entry.amount));
+    setLedgerDescription(entry.description?.trim() ?? "");
+    setLedgerDate(entry.date);
+    setLedgerDatePickerVisible(false);
+    setLedgerModalVisible(true);
+  };
+
+  const closeLedgerModal = () => {
+    setLedgerModalVisible(false);
+    setLedgerDatePickerVisible(false);
+    setEditLedgerEntry(null);
+    setLedgerAmount("");
+    setLedgerDescription("");
+    setLedgerDate("");
+  };
+
+  const handleAddLedgerEntry = async () => {
+    const batchId = selectedBatchId ?? params.batchId;
+    if (!batchId) return;
+    const raw = ledgerAmount.trim().replace(/,/g, ".");
+    if (raw === "") {
+      Alert.alert("Required", "Enter an amount.");
+      return;
+    }
+    const amount = parseFloat(raw);
+    if (!Number.isFinite(amount) || amount < 0) {
+      Alert.alert("Invalid", "Enter a valid positive amount.");
+      return;
+    }
+    setSaving(true);
+    const { error } = await supabase.from("business_ledger").insert({
+      batch_id: batchId,
+      type: ledgerType,
+      amount,
+      currency: currencyCode,
+      description: ledgerDescription.trim() || null,
+      date: ledgerDate.trim() || getTodayISO(),
+    });
+    setSaving(false);
+    closeLedgerModal();
+    if (error) {
+      Alert.alert("Error", error.message);
+      return;
+    }
+    setProfitSearchQuery("");
+    await loadLedger();
+  };
+
+  const handleUpdateLedgerEntry = async () => {
+    if (!editLedgerEntry) return;
+    const raw = ledgerAmount.trim().replace(/,/g, ".");
+    if (raw === "") {
+      Alert.alert("Required", "Enter an amount.");
+      return;
+    }
+    const amount = parseFloat(raw);
+    if (!Number.isFinite(amount) || amount < 0) {
+      Alert.alert("Invalid", "Enter a valid positive amount.");
+      return;
+    }
+    setSaving(true);
+    const { error } = await supabase
+      .from("business_ledger")
+      .update({
+        type: ledgerType,
+        amount,
+        description: ledgerDescription.trim() || null,
+        date: ledgerDate.trim() || getTodayISO(),
+      })
+      .eq("id", editLedgerEntry.id);
+    setSaving(false);
+    closeLedgerModal();
+    if (error) {
+      Alert.alert("Error", error.message);
+      return;
+    }
+    setProfitSearchQuery("");
+    await loadLedger();
+  };
+
+  const confirmDeleteLedgerEntry = (entry: LedgerEntry) => {
+    Alert.alert("Delete?", `Remove this ${entry.type} entry?`, [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          const { error } = await supabase.from("business_ledger").delete().eq("id", entry.id);
+          if (error) {
+            const msg = error.message ?? "";
+            if (msg.includes("PGRST116") || msg.toLowerCase().includes("not found") || msg.toLowerCase().includes("0 rows")) {
+              closeLedgerModal();
+              await loadLedger();
+              return;
+            }
+            Alert.alert("Error", error.message);
+            return;
+          }
+          closeLedgerModal();
+          await loadLedger();
+        },
+      },
+    ]);
   };
 
   const handleAddItem = async () => {
@@ -224,9 +489,14 @@ export default function BusinessInventoryScreen() {
       Alert.alert("Required", "Enter item name.");
       return;
     }
-    const price = parseFloat(purchasePrice.replace(/,/g, "."));
+    const priceRaw = purchasePrice.trim().replace(/,/g, ".");
+    if (priceRaw === "") {
+      Alert.alert("Required", "Enter a purchase price.");
+      return;
+    }
+    const price = parseFloat(priceRaw);
     if (!Number.isFinite(price) || price < 0) {
-      Alert.alert("Invalid", "Enter a valid purchase price.");
+      Alert.alert("Invalid", "Enter a valid positive purchase price.");
       return;
     }
     setSaving(true);
@@ -261,9 +531,14 @@ export default function BusinessInventoryScreen() {
 
   const handleEditSold = async () => {
     if (!editSoldItem) return;
-    const price = parseFloat(editSoldPrice.replace(/,/g, "."));
+    const priceRaw = editSoldPrice.trim().replace(/,/g, ".");
+    if (priceRaw === "") {
+      Alert.alert("Required", "Enter a sold price.");
+      return;
+    }
+    const price = parseFloat(priceRaw);
     if (!Number.isFinite(price) || price < 0) {
-      Alert.alert("Invalid", "Enter a valid sold price.");
+      Alert.alert("Invalid", "Enter a valid positive sold price.");
       return;
     }
     setSaving(true);
@@ -312,17 +587,22 @@ export default function BusinessInventoryScreen() {
         style: "destructive",
         onPress: async () => {
           setDeletingBatch(true);
-          await supabase.from("business_items").delete().eq("batch_id", batchId);
+          setBatchSettingsVisible(false);
+          const { error: itemsErr } = await supabase.from("business_items").delete().eq("batch_id", batchId);
+          if (itemsErr) {
+            setDeletingBatch(false);
+            Alert.alert("Error", itemsErr.message);
+            return;
+          }
           await supabase.from("business_batch_members").delete().eq("batch_id", batchId);
           const { error } = await supabase.from("business_batches").delete().eq("id", batchId).eq("host_id", user.id);
           setDeletingBatch(false);
-          setBatchSettingsVisible(false);
           if (error) {
-            Alert.alert("Error", error.message);
+            Alert.alert("Error", error.message + " You may need to refresh.");
+            await loadBatches();
             return;
           }
-          if (params.projectId) router.replace({ pathname: "/business-project-detail", params: { projectId: params.projectId } });
-          else router.replace("/(tabs)/history");
+          router.back();
         },
       },
     ]);
@@ -337,8 +617,16 @@ export default function BusinessInventoryScreen() {
         onPress: async () => {
           if (fromProfitEdit) setEditSoldVisible(false);
           const { error } = await supabase.from("business_items").delete().eq("id", item.id);
-          if (error) Alert.alert("Error", error.message);
-          else await loadItems();
+          if (error) {
+            const msg = error.message ?? "";
+            if (msg.includes("PGRST116") || msg.toLowerCase().includes("not found") || msg.toLowerCase().includes("0 rows")) {
+              await loadItems();
+              return;
+            }
+            Alert.alert("Error", error.message);
+            return;
+          }
+          await loadItems();
         },
       },
     ]);
@@ -346,24 +634,32 @@ export default function BusinessInventoryScreen() {
 
   const handleMarkSold = async () => {
     if (!soldItem) return;
-    const price = parseFloat(soldPrice.replace(/,/g, "."));
-    if (!Number.isFinite(price) || price < 0) {
-      Alert.alert("Invalid", "Enter a valid sold price.");
+    const priceRaw = soldPrice.trim().replace(/,/g, ".");
+    if (priceRaw === "") {
+      Alert.alert("Required", "Enter a sold price.");
       return;
     }
+    const price = parseFloat(priceRaw);
+    if (!Number.isFinite(price) || price < 0) {
+      Alert.alert("Invalid", "Enter a valid positive sold price.");
+      return;
+    }
+    const soldAtISO = soldAtDate ? `${soldAtDate}T12:00:00.000Z` : new Date().toISOString();
     setSaving(true);
     const { error } = await supabase
       .from("business_items")
-      .update({ sold_price: price, sold_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .update({ sold_price: price, sold_at: soldAtISO, updated_at: new Date().toISOString() })
       .eq("id", soldItem.id);
     setSaving(false);
     setSoldModalVisible(false);
     setSoldItem(null);
     setSoldPrice("");
+    setSoldAtDate("");
     if (error) {
       Alert.alert("Error", error.message);
       return;
     }
+    setProfitSearchQuery("");
     await loadItems();
   };
 
@@ -379,7 +675,10 @@ export default function BusinessInventoryScreen() {
     );
   }
 
-  if (!params.batchId) {
+  if (!params.batchId && !params.projectId) {
+    return <Redirect href="/(tabs)/history" />;
+  }
+  if (params.batchId && batches.length === 0 && !loading) {
     return <Redirect href="/(tabs)/history" />;
   }
 
@@ -388,11 +687,7 @@ export default function BusinessInventoryScreen() {
       <StatusBar style="light" />
       <View style={styles.header}>
         <Pressable
-          onPress={() =>
-            params.projectId
-              ? router.replace({ pathname: "/business-project-detail", params: { projectId: params.projectId } })
-              : router.replace("/(tabs)/history")
-          }
+          onPress={() => router.back()}
           style={({ pressed }) => [styles.backBtn, pressed && styles.pressed]}
           hitSlop={12}
         >
@@ -421,18 +716,24 @@ export default function BusinessInventoryScreen() {
         ))}
       </View>
 
-      {(activeTab === "inventory" || activeTab === "logs") && (
+      {(activeTab === "inventory" || activeTab === "logs" || activeTab === "profits") && (
         <View style={styles.searchWrap}>
           <Ionicons name="search" size={18} color="#737373" style={styles.searchIcon} />
           <TextInput
             style={styles.searchInput}
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-            placeholder={activeTab === "inventory" ? "Search inventory…" : "Search activity…"}
+            value={activeTab === "profits" ? profitSearchQuery : searchQuery}
+            onChangeText={activeTab === "profits" ? setProfitSearchQuery : setSearchQuery}
+            placeholder={
+              activeTab === "inventory" ? "Search inventory…" : activeTab === "profits" ? "Search sales & expenses…" : "Search activity…"
+            }
             placeholderTextColor="#525252"
           />
-          {searchQuery.length > 0 ? (
-            <Pressable onPress={() => setSearchQuery("")} style={styles.searchClear} hitSlop={8}>
+          {(activeTab === "profits" ? profitSearchQuery : searchQuery).length > 0 ? (
+            <Pressable
+              onPress={() => (activeTab === "profits" ? setProfitSearchQuery("") : setSearchQuery(""))}
+              style={styles.searchClear}
+              hitSlop={8}
+            >
               <Ionicons name="close-circle" size={20} color="#737373" />
             </Pressable>
           ) : null}
@@ -454,6 +755,24 @@ export default function BusinessInventoryScreen() {
                 </Pressable>
               )}
             </View>
+            {filteredInventory.length > 0 && (
+              <View style={styles.inventoryTotalCostWrap}>
+                <Text style={styles.inventoryTotalCostLabel}>Total cost (inventory)</Text>
+                <Text style={styles.inventoryTotalCostValue}>{formatAmount(inventoryTotalCost, currencyCode)}</Text>
+              </View>
+            )}
+            {isHost && (
+              <View style={styles.ledgerButtonsRow}>
+                <Pressable style={({ pressed }) => [styles.ledgerBtn, styles.ledgerBtnExpense, pressed && styles.pressed]} onPress={() => openLedgerModal("expense")}>
+                  <Ionicons name="remove-circle-outline" size={18} color="#f97373" />
+                  <Text style={styles.ledgerBtnTextExpense}>Add expense</Text>
+                </Pressable>
+                <Pressable style={({ pressed }) => [styles.ledgerBtn, styles.ledgerBtnIncome, pressed && styles.pressed]} onPress={() => openLedgerModal("income")}>
+                  <Ionicons name="add-circle-outline" size={18} color="#60a5fa" />
+                  <Text style={styles.ledgerBtnTextIncome}>Add income</Text>
+                </Pressable>
+              </View>
+            )}
             {searchFilteredInventory.length === 0 ? (
               <View style={styles.empty}>
                 <Ionicons name="cube-outline" size={48} color="#525252" />
@@ -488,34 +807,55 @@ export default function BusinessInventoryScreen() {
 
         {activeTab === "profits" && (
           <>
-            {filteredProfits.length > 0 ? (
+            {(filteredProfits.length > 0 || filteredLedger.length > 0) ? (
               <View style={styles.profitSummaryWrap}>
-                <View style={styles.profitBubbleRow}>
-                  <View style={[styles.profitBubble, styles.profitBubbleCost]}>
-                    <Text style={styles.profitBubbleLabelCost}>COST</Text>
-                    <Text style={styles.profitBubbleValueCost}>{formatAmount(totalCost, currencyCode)}</Text>
+                {filteredProfits.length > 0 && (
+                  <View style={styles.profitBubbleRow}>
+                    <View style={[styles.profitBubble, styles.profitBubbleRevenue]}>
+                      <Text style={styles.profitBubbleLabelRevenue}>REVENUE</Text>
+                      <Text style={styles.profitBubbleValueRevenue}>{formatAmount(profitDisplayRevenue, currencyCode)}</Text>
+                    </View>
+                    <View style={[styles.profitBubble, styles.profitBubbleCost]}>
+                      <Text style={styles.profitBubbleLabelCost}>COST</Text>
+                      <Text style={styles.profitBubbleValueCost}>{formatAmount(profitDisplayCost, currencyCode)}</Text>
+                    </View>
                   </View>
-                  <View style={[styles.profitBubble, styles.profitBubbleRevenue]}>
-                    <Text style={styles.profitBubbleLabelRevenue}>REVENUE</Text>
-                    <Text style={styles.profitBubbleValueRevenue}>{formatAmount(totalRevenue, currencyCode)}</Text>
+                )}
+                {filteredLedger.length > 0 && (
+                  <View style={styles.profitBubbleRow}>
+                    <View style={[styles.profitBubble, styles.profitBubbleRevenue]}>
+                      <Text style={styles.profitBubbleLabelRevenue}>INCOME</Text>
+                      <Text style={styles.profitBubbleValueRevenue}>{formatAmount(profitDisplayIncome, currencyCode)}</Text>
+                    </View>
+                    <View style={[styles.profitBubble, styles.profitBubbleCost]}>
+                      <Text style={styles.profitBubbleLabelCost}>EXPENSE</Text>
+                      <Text style={styles.profitBubbleValueCost}>{formatAmount(profitDisplayExpense, currencyCode)}</Text>
+                    </View>
                   </View>
-                </View>
+                )}
                 <View style={styles.profitTotalCard}>
-                  <Text style={styles.profitTotalLabel}>TOTAL PROFIT</Text>
-                  <Text style={[styles.profitTotalValue, totalProfit >= 0 ? styles.profitTotalPositive : styles.profitTotalNegative]}>
-                    {formatAmount(totalProfit, currencyCode)}
+                  <Text style={styles.profitTotalLabel}>TOTAL PROFIT{profitSearchLower ? " (filtered)" : ""}</Text>
+                  <Text style={[styles.profitTotalValue, profitDisplayTotal >= 0 ? styles.profitTotalPositive : styles.profitTotalNegative]}>
+                    {formatAmount(profitDisplayTotal, currencyCode)}
                   </Text>
                 </View>
               </View>
             ) : null}
-            {filteredProfits.length === 0 ? (
+            {filteredProfits.length === 0 && filteredLedger.length === 0 ? (
               <View style={styles.empty}>
                 <Ionicons name="trending-up-outline" size={48} color="#525252" />
                 <Text style={styles.emptyText}>No sales yet</Text>
-                <Text style={styles.emptySub}>Mark items as SOLD in Inventory to see profits here.</Text>
+                <Text style={styles.emptySub}>Mark items as SOLD in Inventory, or add expense/income to track profit.</Text>
+              </View>
+            ) : (profitDisplaySold.length === 0 && profitDisplayLedger.length === 0) ? (
+              <View style={styles.empty}>
+                <Ionicons name="search-outline" size={48} color="#525252" />
+                <Text style={styles.emptyText}>No matches</Text>
+                <Text style={styles.emptySub}>Try different keywords.</Text>
               </View>
             ) : (
-              filteredProfits.map((item) => {
+              <>
+                {profitDisplaySold.map((item) => {
                 const profit = Number(item.sold_price ?? 0) - Number(item.purchase_price);
                 const profitAbs = Math.abs(profit);
                 const profitLabel = profit >= 0 ? "PROFIT" : "LOSS";
@@ -544,24 +884,85 @@ export default function BusinessInventoryScreen() {
                     )}
                   </View>
                 );
-              })
+                })}
+                {profitDisplayLedger.length > 0 && (
+                  <>
+                    <Text style={[styles.sectionLabel, { marginTop: 8, marginBottom: 10 }]}>
+                      Expense & income{profitSearchLower ? ` (${profitDisplayLedger.length})` : ""}
+                    </Text>
+                    {profitDisplayLedger.map((entry) => (
+                      <View key={entry.id} style={styles.profitCard}>
+                        <View style={styles.profitCardMain}>
+                          <Text style={styles.itemName} numberOfLines={1}>
+                            {entry.type === "income" ? "Income" : "Expense"}: {entry.description?.trim() || "—"}
+                          </Text>
+                          <Text style={[styles.profitResultText, entry.type === "income" ? styles.profitPositive : styles.profitNegative]}>
+                            {entry.type === "income" ? "+" : "−"} {formatAmount(entry.amount, entry.currency)}
+                          </Text>
+                          <Text style={styles.itemMeta}>{entry.date}</Text>
+                        </View>
+                        {isHost && (
+                          <Pressable style={({ pressed }) => [styles.editSoldBtn, pressed && styles.pressed]} onPress={() => openEditLedgerModal(entry)}>
+                            <Ionicons name="pencil" size={18} color="#0a0a0a" />
+                          </Pressable>
+                        )}
+                      </View>
+                    ))}
+                  </>
+                )}
+              </>
             )}
           </>
         )}
 
         {activeTab === "logs" && (
           <>
-            <Text style={styles.sectionLabel}>Activity{searchQuery.trim() ? ` (${searchFilteredLogs.length} of ${filteredLogsByBatch.length})` : ""}</Text>
-            {searchFilteredLogs.length === 0 ? (
+            <View style={styles.logsToolbar}>
+              <Text style={styles.sectionLabel}>Activity{searchQuery.trim() ? ` (${typeFilteredLogs.length} of ${filteredLogsByBatch.length})` : ""}</Text>
+              <View style={styles.logFilterRow}>
+                {(["all", "added", "sold", "expense", "income"] as LogFilterId[]).map((f) => (
+                  <Pressable
+                    key={f}
+                    style={[styles.logFilterChip, logFilter === f && styles.logFilterChipActive]}
+                    onPress={() => setLogFilter(f)}
+                  >
+                    <Text style={[styles.logFilterChipText, logFilter === f && styles.logFilterChipTextActive]}>
+                      {f === "all" ? "All" : f === "added" ? "Added" : f === "sold" ? "Sold" : f === "expense" ? "Expense" : "Income"}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+            {typeFilteredLogs.length === 0 ? (
               <View style={styles.empty}>
-                <Ionicons name="list-outline" size={48} color="#525252" />
-                <Text style={styles.emptyText}>{filteredLogsByBatch.length === 0 ? "No activity yet" : "No matches"}</Text>
-                <Text style={styles.emptySub}>{filteredLogsByBatch.length === 0 ? "" : "Try different keywords."}</Text>
+                <Ionicons name={filteredLogsByBatch.length === 0 ? "list-outline" : "search-outline"} size={48} color="#525252" />
+                <Text style={styles.emptyText}>
+                  {filteredLogsByBatch.length === 0 ? "No activity yet" : searchQuery.trim() ? `No activity matches "${searchQuery.trim()}"` : "No matches"}
+                </Text>
+                <Text style={styles.emptySub}>
+                  {filteredLogsByBatch.length === 0 ? "" : "Try different keywords or filter, or clear search."}
+                </Text>
+                {filteredLogsByBatch.length > 0 && searchQuery.trim() ? (
+                  <Pressable style={({ pressed }) => [styles.clearSearchBtn, pressed && styles.pressed]} onPress={() => setSearchQuery("")}>
+                    <Text style={styles.clearSearchBtnText}>Clear search</Text>
+                  </Pressable>
+                ) : null}
               </View>
             ) : (
-              searchFilteredLogs.map((entry, idx) => (
-                <View key={`${entry.item.id}-${entry.type}-${idx}`} style={styles.logRow}>
-                  <View style={[styles.logDot, entry.type === "sold" ? styles.logDotSold : styles.logDotAdded]} />
+              typeFilteredLogs.map((entry, idx) => (
+                <View
+                  key={"item" in entry ? `${entry.item.id}-${entry.type}-${idx}` : `ledger-${entry.ledger.id}`}
+                  style={styles.logRow}
+                >
+                  <View
+                    style={[
+                      styles.logDot,
+                      entry.type === "sold" && styles.logDotSold,
+                      entry.type === "added" && styles.logDotAdded,
+                      entry.type === "income" && styles.logDotIncome,
+                      entry.type === "expense" && styles.logDotExpense,
+                    ]}
+                  />
                   <View style={styles.logContent}>
                     <Text style={styles.logText}>{entry.text}</Text>
                     <Text style={styles.logDate}>{new Date(entry.date).toLocaleString()}</Text>
@@ -632,30 +1033,55 @@ export default function BusinessInventoryScreen() {
 
       {/* Sold price modal */}
       <Modal visible={soldModalVisible} transparent animationType="fade">
-        <Pressable style={styles.modalBackdrop} onPress={() => setSoldModalVisible(false)}>
-          <Pressable style={styles.modalCard} onPress={() => {}}>
-            <Text style={styles.modalTitle}>Mark as sold</Text>
-            {soldItem && (
-              <>
-                <Text style={styles.modalSub}>{soldItem.item_name} — cost {formatAmount(soldItem.purchase_price, soldItem.currency)}</Text>
-                <TextInput
-                  style={styles.input}
-                  value={soldPrice}
-                  onChangeText={setSoldPrice}
-                  placeholder={`Sold price (${getCurrency(soldItem.currency).symbol})`}
-                  placeholderTextColor="#525252"
-                  keyboardType="decimal-pad"
-                />
-              </>
-            )}
-            <View style={styles.modalActions}>
-              <Pressable style={[styles.modalBtn, styles.modalBtnCancel]} onPress={() => setSoldModalVisible(false)}>
-                <Text style={styles.modalBtnCancelText}>Cancel</Text>
-              </Pressable>
-              <Pressable style={[styles.modalBtn, styles.modalBtnSave]} onPress={handleMarkSold} disabled={saving || !soldPrice.trim()}>
-                <Text style={styles.modalBtnSaveText}>{saving ? "…" : "Save"}</Text>
-              </Pressable>
-            </View>
+        <Pressable style={styles.modalBackdrop} onPress={() => { setSoldModalVisible(false); setSoldDatePickerVisible(false); }}>
+          <Pressable style={[styles.modalCard, styles.modalCardWide]} onPress={() => {}}>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <Text style={styles.modalTitle}>Mark as sold</Text>
+              {soldItem && (
+                <>
+                  <Text style={styles.modalSub}>{soldItem.item_name} — cost {formatAmount(soldItem.purchase_price, soldItem.currency)}</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={soldPrice}
+                    onChangeText={setSoldPrice}
+                    placeholder={`Sold price (${getCurrency(soldItem.currency).symbol})`}
+                    placeholderTextColor="#525252"
+                    keyboardType="decimal-pad"
+                  />
+                  <Text style={styles.inputLabel}>Sold on</Text>
+                  <Pressable style={styles.datePressable} onPress={() => setSoldDatePickerVisible(true)}>
+                    <Text style={styles.datePressableText}>
+                      {soldAtDate ? (soldAtDate === getTodayISO() ? "Today — " + soldAtDate : soldAtDate) : "Tap to set date"}
+                    </Text>
+                    <Ionicons name="calendar-outline" size={20} color="#8DEB63" />
+                  </Pressable>
+                  {soldDatePickerVisible && (
+                    <DateTimePicker
+                      value={soldAtDate ? new Date(soldAtDate + "T12:00:00") : new Date()}
+                      mode="date"
+                      display={Platform.OS === "ios" ? "spinner" : "default"}
+                      onChange={(_, selectedDate) => {
+                        if (Platform.OS === "android") setSoldDatePickerVisible(false);
+                        if (selectedDate) {
+                          const y = selectedDate.getFullYear();
+                          const m = String(selectedDate.getMonth() + 1).padStart(2, "0");
+                          const d = String(selectedDate.getDate()).padStart(2, "0");
+                          setSoldAtDate(`${y}-${m}-${d}`);
+                        }
+                      }}
+                    />
+                  )}
+                </>
+              )}
+              <View style={styles.modalActions}>
+                <Pressable style={[styles.modalBtn, styles.modalBtnCancel]} onPress={() => { setSoldModalVisible(false); setSoldDatePickerVisible(false); }}>
+                  <Text style={styles.modalBtnCancelText}>Cancel</Text>
+                </Pressable>
+                <Pressable style={[styles.modalBtn, styles.modalBtnSave]} onPress={handleMarkSold} disabled={saving || !soldPrice.trim()}>
+                  <Text style={styles.modalBtnSaveText}>{saving ? "…" : "Save"}</Text>
+                </Pressable>
+              </View>
+            </ScrollView>
           </Pressable>
         </Pressable>
       </Modal>
@@ -692,6 +1118,96 @@ export default function BusinessInventoryScreen() {
                 <Text style={styles.deleteItemInModalText}>Delete item</Text>
               </Pressable>
             ) : null}
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* Add expense / Add income modal */}
+      <Modal visible={ledgerModalVisible} transparent animationType="fade">
+        <Pressable style={styles.modalBackdrop} onPress={() => closeLedgerModal()}>
+          <Pressable style={[styles.modalCard, styles.modalCardWide]} onPress={() => {}}>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <Text style={styles.modalTitle}>
+                {editLedgerEntry ? (ledgerType === "income" ? "Edit income" : "Edit expense") : ledgerType === "income" ? "Add income" : "Add expense"}
+              </Text>
+              <Text style={styles.modalSub}>
+                {editLedgerEntry ? "Update amount, description, or date." : `Company-related ${ledgerType}. Contributes to Profit tab.`}
+              </Text>
+              {editLedgerEntry ? (
+                <View style={styles.ledgerTypeRow}>
+                  <Pressable
+                    style={[styles.ledgerTypeChip, ledgerType === "expense" && styles.ledgerTypeChipActive]}
+                    onPress={() => setLedgerType("expense")}
+                  >
+                    <Text style={[styles.ledgerTypeChipText, ledgerType === "expense" && styles.ledgerTypeChipTextActive]}>Expense</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.ledgerTypeChip, ledgerType === "income" && styles.ledgerTypeChipActive]}
+                    onPress={() => setLedgerType("income")}
+                  >
+                    <Text style={[styles.ledgerTypeChipText, ledgerType === "income" && styles.ledgerTypeChipTextActive]}>Income</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+              <Text style={styles.inputLabel}>Amount ({getCurrency(currencyCode).symbol})</Text>
+              <TextInput
+                style={styles.input}
+                value={ledgerAmount}
+                onChangeText={setLedgerAmount}
+                placeholder="0"
+                placeholderTextColor="#525252"
+                keyboardType="decimal-pad"
+              />
+              <Text style={styles.inputLabel}>Description (optional)</Text>
+              <TextInput
+                style={styles.input}
+                value={ledgerDescription}
+                onChangeText={setLedgerDescription}
+                placeholder={ledgerType === "income" ? "e.g. Refund, other income" : "e.g. Shipping, fees"}
+                placeholderTextColor="#525252"
+              />
+              <Text style={styles.inputLabel}>Date</Text>
+              <Pressable style={styles.datePressable} onPress={() => setLedgerDatePickerVisible(true)}>
+                <Text style={styles.datePressableText}>
+                  {ledgerDate ? (ledgerDate === getTodayISO() ? "Today — " + ledgerDate : ledgerDate) : "Tap to set date"}
+                </Text>
+                <Ionicons name="calendar-outline" size={20} color="#8DEB63" />
+              </Pressable>
+              {ledgerDatePickerVisible && (
+                <DateTimePicker
+                  value={ledgerDate ? new Date(ledgerDate + "T12:00:00") : new Date()}
+                  mode="date"
+                  display={Platform.OS === "ios" ? "spinner" : "default"}
+                  onChange={(_, selectedDate) => {
+                    if (Platform.OS === "android") setLedgerDatePickerVisible(false);
+                    if (selectedDate) {
+                      const y = selectedDate.getFullYear();
+                      const m = String(selectedDate.getMonth() + 1).padStart(2, "0");
+                      const d = String(selectedDate.getDate()).padStart(2, "0");
+                      setLedgerDate(`${y}-${m}-${d}`);
+                    }
+                  }}
+                />
+              )}
+              <View style={styles.modalActions}>
+                <Pressable style={[styles.modalBtn, styles.modalBtnCancel]} onPress={closeLedgerModal}>
+                  <Text style={styles.modalBtnCancelText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.modalBtn, styles.modalBtnSave]}
+                  onPress={editLedgerEntry ? handleUpdateLedgerEntry : handleAddLedgerEntry}
+                  disabled={saving || !ledgerAmount.trim()}
+                >
+                  <Text style={styles.modalBtnSaveText}>{saving ? "…" : editLedgerEntry ? "Save" : "Add"}</Text>
+                </Pressable>
+              </View>
+              {editLedgerEntry ? (
+                <Pressable style={styles.deleteItemInModalBtn} onPress={() => confirmDeleteLedgerEntry(editLedgerEntry)}>
+                  <Ionicons name="trash-outline" size={18} color="#f97373" />
+                  <Text style={styles.deleteItemInModalText}>Delete entry</Text>
+                </Pressable>
+              ) : null}
+            </ScrollView>
           </Pressable>
         </Pressable>
       </Modal>
@@ -757,11 +1273,22 @@ const styles = StyleSheet.create({
   scrollContent: { paddingHorizontal: 16, paddingBottom: 32 },
   toolbar: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 14 },
   sectionLabel: { color: "#737373", fontSize: 12, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 },
+  inventoryTotalCostWrap: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 14, paddingVertical: 10, paddingHorizontal: 14, backgroundColor: "rgba(141,235,99,0.08)", borderRadius: 12, borderWidth: 1, borderColor: "rgba(141,235,99,0.2)" },
+  inventoryTotalCostLabel: { color: "#8DEB63", fontSize: 12, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 },
+  inventoryTotalCostValue: { color: "#fff", fontSize: 16, fontWeight: "800" },
   addBtn: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 10, paddingHorizontal: 16, borderRadius: 12, backgroundColor: "#8DEB63" },
   addBtnText: { color: "#0a0a0a", fontSize: 14, fontWeight: "700" },
+  ledgerButtonsRow: { flexDirection: "row", gap: 10, marginBottom: 14 },
+  ledgerBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 12, paddingHorizontal: 14, borderRadius: 12, borderWidth: 1 },
+  ledgerBtnExpense: { backgroundColor: "rgba(249,115,115,0.12)", borderColor: "rgba(249,115,115,0.4)" },
+  ledgerBtnIncome: { backgroundColor: "rgba(96,165,250,0.12)", borderColor: "rgba(96,165,250,0.4)" },
+  ledgerBtnTextExpense: { color: "#f97373", fontSize: 14, fontWeight: "700" },
+  ledgerBtnTextIncome: { color: "#60a5fa", fontSize: 14, fontWeight: "700" },
   empty: { alignItems: "center", paddingVertical: 48, gap: 12 },
   emptyText: { color: "#a3a3a3", fontSize: 16, fontWeight: "600" },
   emptySub: { color: "#737373", fontSize: 14 },
+  clearSearchBtn: { marginTop: 14, paddingVertical: 10, paddingHorizontal: 16, borderRadius: 10, backgroundColor: "rgba(141,235,99,0.12)", borderWidth: 1, borderColor: "rgba(141,235,99,0.3)" },
+  clearSearchBtnText: { color: "#8DEB63", fontSize: 14, fontWeight: "700" },
   itemCard: {
     backgroundColor: "#141414",
     borderRadius: 14,
@@ -856,6 +1383,14 @@ const styles = StyleSheet.create({
   logDot: { width: 8, height: 8, borderRadius: 4, marginTop: 6 },
   logDotAdded: { backgroundColor: "#737373" },
   logDotSold: { backgroundColor: "#8DEB63" },
+  logDotIncome: { backgroundColor: "#60a5fa" },
+  logDotExpense: { backgroundColor: "#f97373" },
+  logsToolbar: { marginBottom: 14 },
+  logFilterRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 10 },
+  logFilterChip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: "rgba(255,255,255,0.08)", borderWidth: 1, borderColor: "rgba(255,255,255,0.1)" },
+  logFilterChipActive: { backgroundColor: "rgba(141,235,99,0.2)", borderColor: "#8DEB63" },
+  logFilterChipText: { color: "#a3a3a3", fontSize: 14, fontWeight: "600" },
+  logFilterChipTextActive: { color: "#8DEB63" },
   logContent: { flex: 1, minWidth: 0, paddingVertical: 4 },
   logText: { color: "#e5e5e5", fontSize: 14, lineHeight: 20 },
   logDate: { color: "#737373", fontSize: 12, marginTop: 6 },
@@ -878,6 +1413,11 @@ const styles = StyleSheet.create({
   modalBtnCancelText: { color: "#e5e5e5", fontSize: 15, fontWeight: "600" },
   modalBtnSave: { backgroundColor: "#8DEB63" },
   modalBtnSaveText: { color: "#0a0a0a", fontSize: 15, fontWeight: "700" },
+  ledgerTypeRow: { flexDirection: "row", gap: 10, marginBottom: 16 },
+  ledgerTypeChip: { flex: 1, paddingVertical: 12, borderRadius: 12, alignItems: "center", borderWidth: 1, borderColor: "rgba(255,255,255,0.1)", backgroundColor: "#141414" },
+  ledgerTypeChipActive: { borderColor: "#8DEB63", backgroundColor: "rgba(141,235,99,0.15)" },
+  ledgerTypeChipText: { color: "#a3a3a3", fontSize: 15, fontWeight: "600" },
+  ledgerTypeChipTextActive: { color: "#8DEB63" },
   deleteItemInModalBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 16, paddingVertical: 12, borderWidth: 1, borderColor: "rgba(249,115,115,0.4)", borderRadius: 12 },
   deleteItemInModalText: { color: "#f97373", fontSize: 14, fontWeight: "600" },
   deleteBatchBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 20, paddingVertical: 14, borderWidth: 1, borderColor: "rgba(249,115,115,0.5)", borderRadius: 12 },
