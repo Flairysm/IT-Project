@@ -19,14 +19,6 @@ type GroupRow = {
   avatar_url?: string | null;
   isHost?: boolean;
 };
-type GroupInvitation = {
-  id: string;
-  group_id: string;
-  group_name: string;
-  group_avatar_url: string | null;
-  host_username: string;
-};
-
 type FriendOption = { id: string; username: string };
 
 function groupInitial(name: string): string {
@@ -39,7 +31,6 @@ export default function GroupsScreen() {
   const router = useRouter();
   const { user } = useAuth();
   const [groups, setGroups] = useState<GroupRow[]>([]);
-  const [invitations, setInvitations] = useState<GroupInvitation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [groupName, setGroupName] = useState("");
@@ -49,7 +40,6 @@ export default function GroupsScreen() {
   const [createModalVisible, setCreateModalVisible] = useState(false);
   const [friendSearchQuery, setFriendSearchQuery] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
-  const [activeTab, setActiveTab] = useState<"all" | "requests">("all");
   const [refreshing, setRefreshing] = useState(false);
 
   const loadFriends = useCallback(async () => {
@@ -117,37 +107,6 @@ export default function GroupsScreen() {
           };
         });
       setGroups(list);
-
-      // Pending invitations: my group_members rows with status = pending
-      const { data: invRows, error: invErr } = await supabase
-        .from("group_members")
-        .select("id, group_id, groups(id, name, avatar_url, host_id)")
-        .eq("user_id", user.id)
-        .eq("status", "pending");
-      if (invErr) {
-        setInvitations([]);
-        return;
-      }
-      const invList = (invRows || []) as { id: string; group_id: string; groups: { id: string; name: string; avatar_url?: string | null; host_id: string } | null }[];
-      const hostIds = [...new Set(invList.map((i) => i.groups?.host_id).filter(Boolean))] as string[];
-      const hostProfiles: Record<string, string> = {};
-      if (hostIds.length > 0) {
-        const { data: profs } = await supabase.from("profiles").select("id, username").in("id", hostIds);
-        for (const p of profs || []) {
-          hostProfiles[(p as { id: string }).id] = (p as { username: string }).username ?? "?";
-        }
-      }
-      setInvitations(
-        invList
-          .filter((i) => i.groups)
-          .map((i) => ({
-            id: i.id,
-            group_id: i.group_id,
-            group_name: i.groups!.name,
-            group_avatar_url: i.groups!.avatar_url ?? null,
-            host_username: hostProfiles[i.groups!.host_id] ?? "?",
-          }))
-      );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load groups");
     } finally {
@@ -220,7 +179,7 @@ export default function GroupsScreen() {
 
       const memberRows = [
         { group_id: groupId, user_id: user.id, status: "accepted" as const },
-        ...selectedMemberIds.map((friendId) => ({ group_id: groupId, user_id: friendId, status: "pending" as const })),
+        ...selectedMemberIds.map((friendId) => ({ group_id: groupId, user_id: friendId, status: "accepted" as const })),
       ];
       const { error: membersErr } = await supabase.from("group_members").insert(memberRows);
       if (membersErr) throw new Error(membersErr.message);
@@ -252,35 +211,6 @@ export default function GroupsScreen() {
       { text: "Cancel", style: "cancel" },
       { text: "Delete", style: "destructive", onPress: () => void deleteGroup(g.id) },
     ]);
-  };
-
-  const acceptInvitation = async (inv: GroupInvitation) => {
-    try {
-      const { error } = await supabase
-        .from("group_members")
-        .update({ status: "accepted" })
-        .eq("id", inv.id)
-        .eq("user_id", user!.id);
-      if (error) throw new Error(error.message);
-      setInvitations((prev) => prev.filter((i) => i.id !== inv.id));
-      await loadGroups();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to accept");
-    }
-  };
-
-  const rejectInvitation = async (inv: GroupInvitation) => {
-    try {
-      const { error } = await supabase
-        .from("group_members")
-        .delete()
-        .eq("id", inv.id)
-        .eq("user_id", user!.id);
-      if (error) throw new Error(error.message);
-      setInvitations((prev) => prev.filter((i) => i.id !== inv.id));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to reject");
-    }
   };
 
   return (
@@ -326,62 +256,7 @@ export default function GroupsScreen() {
           </View>
         ) : null}
 
-        <View style={styles.tabRow}>
-          <Pressable style={[styles.tab, activeTab === "all" && styles.tabActive]} onPress={() => setActiveTab("all")}>
-            <Text style={[styles.tabText, activeTab === "all" && styles.tabTextActive]}>All ({groups.length})</Text>
-          </Pressable>
-          <Pressable style={[styles.tab, activeTab === "requests" && styles.tabActive]} onPress={() => setActiveTab("requests")}>
-            <Text style={[styles.tabText, activeTab === "requests" && styles.tabTextActive]}>Group requests</Text>
-            {invitations.length > 0 ? (
-              <View style={[styles.tabBadge, styles.tabBadgeAlert]}>
-                <Text style={styles.tabBadgeText}>{invitations.length}</Text>
-              </View>
-            ) : null}
-          </Pressable>
-        </View>
-
-        {activeTab === "requests" ? (
-          <View style={styles.section}>
-            {invitations.length === 0 ? (
-              <View style={styles.emptyState}>
-                <View style={styles.emptyAvatar}>
-                  <Ionicons name="mail-open-outline" size={40} color="#525252" />
-                </View>
-                <Text style={styles.emptyTitle}>No group requests</Text>
-                <Text style={styles.emptySub}>When someone adds you to a group, you can accept or reject here.</Text>
-              </View>
-            ) : (
-              <View style={styles.invitationsCard}>
-              {invitations.map((inv) => (
-                <View key={inv.id} style={styles.invitationRow}>
-                  <View style={styles.invitationLeft}>
-                    {inv.group_avatar_url ? (
-                      <Image source={{ uri: inv.group_avatar_url }} style={styles.invitationGroupAvatar} />
-                    ) : (
-                      <View style={styles.invitationGroupAvatarPlaceholder}>
-                        <Text style={styles.invitationGroupAvatarText}>{groupInitial(inv.group_name)}</Text>
-                      </View>
-                    )}
-                    <View style={styles.invitationInfo}>
-                      <Text style={styles.invitationGroupName}>{inv.group_name}</Text>
-                      <Text style={styles.invitationMeta}>Invited by @{inv.host_username}</Text>
-                    </View>
-                  </View>
-                  <View style={styles.invitationActions}>
-                    <Pressable style={({ pressed }) => [styles.invitationReject, pressed && styles.pressed]} onPress={() => void rejectInvitation(inv)}>
-                      <Text style={styles.invitationRejectText}>Reject</Text>
-                    </Pressable>
-                    <Pressable style={({ pressed }) => [styles.invitationAccept, pressed && styles.pressed]} onPress={() => void acceptInvitation(inv)}>
-                      <Text style={styles.invitationAcceptText}>Accept</Text>
-                    </Pressable>
-                  </View>
-                </View>
-              ))}
-              </View>
-            )}
-          </View>
-        ) : (
-          <View style={styles.section}>
+        <View style={styles.section}>
             <View style={styles.searchRowWrap}>
               <View style={styles.searchRow}>
                 <Ionicons name="search" size={20} color="#737373" style={styles.searchIcon} />
@@ -465,7 +340,6 @@ export default function GroupsScreen() {
             </View>
           )}
           </View>
-        )}
       </ScrollView>
 
       <Modal transparent visible={createModalVisible} animationType="fade" onRequestClose={() => setCreateModalVisible(false)}>

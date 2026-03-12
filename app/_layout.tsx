@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, StyleSheet, View } from "react-native";
 import { Stack, useRouter } from "expo-router";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -43,11 +43,26 @@ function NotificationHandler() {
 }
 
 function AppNavigator() {
-  const { user, loading } = useAuth();
+  const { user, profile, loading, refreshProfile } = useAuth();
   const segments = useSegments();
   const inAuthScreen = segments[0] === "auth";
+  const [profileRefreshDone, setProfileRefreshDone] = useState(false);
 
-  if (loading) {
+  // When we have a session but profile is still null (e.g. slow or failed fetch), retry once so we don't show tabs with "email" as display name
+  useEffect(() => {
+    if (!user || profile !== null || profileRefreshDone) return;
+    let mounted = true;
+    refreshProfile().then(() => {
+      if (mounted) setProfileRefreshDone(true);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [user, profile, profileRefreshDone, refreshProfile]);
+
+  const effectiveLoading = loading || (user != null && profile === null && !profileRefreshDone);
+
+  if (effectiveLoading) {
     return (
       <View style={styles.loadingScreen}>
         <ActivityIndicator size="large" color="#8DEB63" />

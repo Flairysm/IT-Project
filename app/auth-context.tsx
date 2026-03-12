@@ -107,22 +107,42 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const p = await fetchProfile(s.user.id);
           if (cancelled) return;
           setProfile(p);
+          if (!cancelled) setLoading(false);
+          return;
         }
+        // No session from first getSession() — may be async storage not ready yet.
+        // Do not set loading=false here; let onAuthStateChange fire with restored session.
       } catch {
-        // Ensure we never stay stuck on loading
-      } finally {
+        // Ensure we never stay stuck on loading if getSession throws
         if (!cancelled) setLoading(false);
       }
     };
     init();
-    const t = setTimeout(() => {
+
+    // If we still have no session after a short delay, recheck (async storage may have been slow).
+    const recheckT = setTimeout(async () => {
+      if (cancelled) return;
+      const { data: { session: s } } = await supabase.auth.getSession();
+      if (cancelled) return;
+      setSession(s);
+      if (s?.user) {
+        const p = await fetchProfile(s.user.id);
+        if (!cancelled) setProfile(p);
+      } else {
+        setProfile(null);
+      }
+      if (!cancelled) setLoading(false);
+    }, 2000);
+
+    const maxT = setTimeout(() => {
       cancelled = true;
       setLoading((prev) => (prev ? false : prev));
     }, 8000);
 
     return () => {
       cancelled = true;
-      clearTimeout(t);
+      clearTimeout(recheckT);
+      clearTimeout(maxT);
       subscription.unsubscribe();
     };
   }, []);

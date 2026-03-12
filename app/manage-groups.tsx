@@ -75,7 +75,7 @@ export default function ManageGroupsScreen() {
       for (const username of memberNames) {
         const { data: profileRow } = await supabase.from("profiles").select("id").eq("username", username).maybeSingle();
         if (profileRow?.id) {
-          await supabase.from("group_members").insert({ group_id: groupId, user_id: profileRow.id });
+          await supabase.from("group_members").insert({ group_id: groupId, user_id: profileRow.id, status: "accepted" });
         }
       }
       setGroupName("");

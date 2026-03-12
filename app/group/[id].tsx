@@ -40,7 +40,6 @@ export default function GroupDetailScreen() {
   const [groupName, setGroupName] = useState("");
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [members, setMembers] = useState<MemberRow[]>([]);
-  const [pendingMembers, setPendingMembers] = useState<MemberRow[]>([]);
   const [hostId, setHostId] = useState<string | null>(null);
   const [addModalVisible, setAddModalVisible] = useState(false);
   const [friendsList, setFriendsList] = useState<FriendOption[]>([]);
@@ -70,16 +69,8 @@ export default function GroupDetailScreen() {
       setHostId((g as { host_id?: string }).host_id ?? null);
       const gms = (g as { group_members?: Array<{ user_id: string; status?: string; profiles?: { username?: string; avatar_url?: string | null } | null }> }).group_members ?? [];
       const acceptedOnly = gms.filter((gm) => gm.status === "accepted");
-      const pendingOnly = gms.filter((gm) => gm.status === "pending");
       setMembers(
         acceptedOnly.map((gm) => ({
-          user_id: gm.user_id,
-          username: (gm.profiles as { username?: string })?.username ?? "?",
-          avatar_url: (gm.profiles as { avatar_url?: string | null })?.avatar_url ?? null,
-        }))
-      );
-      setPendingMembers(
-        pendingOnly.map((gm) => ({
           user_id: gm.user_id,
           username: (gm.profiles as { username?: string })?.username ?? "?",
           avatar_url: (gm.profiles as { avatar_url?: string | null })?.avatar_url ?? null,
@@ -239,7 +230,7 @@ export default function GroupDetailScreen() {
     setError(null);
     try {
       for (const uid of selectedIds) {
-        await supabase.from("group_members").insert({ group_id: id, user_id: uid, status: "pending" });
+        await supabase.from("group_members").insert({ group_id: id, user_id: uid, status: "accepted" });
       }
       setAddModalVisible(false);
       setSelectedIds([]);
@@ -379,7 +370,7 @@ export default function GroupDetailScreen() {
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionLabel}>
-              Members ({members.length}{pendingMembers.length > 0 ? ` of ${members.length + pendingMembers.length}` : ""})
+              Members ({members.length})
             </Text>
             {isHost ? (
               <Pressable style={({ pressed }) => [styles.addMemberBtn, pressed && styles.pressed]} onPress={() => setAddModalVisible(true)}>
@@ -410,27 +401,6 @@ export default function GroupDetailScreen() {
             ))}
           </View>
         </View>
-
-        {isHost && pendingMembers.length > 0 ? (
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Pending invitations ({pendingMembers.length})</Text>
-            <View style={styles.memberList}>
-              {pendingMembers.map((m, idx) => (
-                <View key={m.user_id} style={[styles.memberRow, idx === pendingMembers.length - 1 && styles.memberRowLast]}>
-                  {m.avatar_url ? (
-                    <Image source={{ uri: m.avatar_url }} style={styles.memberAvatarImg} />
-                  ) : (
-                    <View style={styles.memberAvatar}>
-                      <Text style={styles.memberAvatarText}>{groupInitial(m.username)}</Text>
-                    </View>
-                  )}
-                  <Text style={styles.memberName}>@{m.username}</Text>
-                  <Text style={styles.pendingChip}>Pending</Text>
-                </View>
-              ))}
-            </View>
-          </View>
-        ) : null}
 
         {!isHost && user?.id && members.some((m) => m.user_id === user.id) ? (
           <View style={styles.leaveSection}>
