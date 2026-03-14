@@ -119,20 +119,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
     init();
 
-    // If we still have no session after a short delay, recheck (async storage may have been slow).
-    const recheckT = setTimeout(async () => {
+    const runRecheck = async () => {
       if (cancelled) return;
-      const { data: { session: s } } = await supabase.auth.getSession();
-      if (cancelled) return;
-      setSession(s);
-      if (s?.user) {
-        const p = await fetchProfile(s.user.id);
-        if (!cancelled) setProfile(p);
-      } else {
-        setProfile(null);
+      try {
+        const { data: { session: s } } = await supabase.auth.getSession();
+        if (cancelled) return;
+        setSession(s);
+        if (s?.user) {
+          const p = await fetchProfile(s.user.id);
+          if (!cancelled) setProfile(p);
+        } else {
+          setProfile(null);
+        }
+      } catch {
+        // ignore
+      } finally {
+        if (!cancelled) setLoading(false);
       }
+    };
+
+    // Early recheck: async storage often ready by ~600ms; don't rely only on onAuthStateChange.
+    const earlyT = setTimeout(() => void runRecheck(), 600);
+
+    // Later recheck in case storage was very slow.
+    const recheckT = setTimeout(() => void runRecheck(), 2000);
+
+    // Safety: never show spinner longer than 3s; unblock even if getSession/fetchProfile hang.
+    const safetyT = setTimeout(() => {
       if (!cancelled) setLoading(false);
-    }, 2000);
+    }, 3000);
 
     const maxT = setTimeout(() => {
       cancelled = true;
@@ -141,7 +156,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       cancelled = true;
+      clearTimeout(earlyT);
       clearTimeout(recheckT);
+      clearTimeout(safetyT);
       clearTimeout(maxT);
       subscription.unsubscribe();
     };

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { Alert, Modal, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
@@ -43,6 +43,10 @@ export default function FriendsScreen() {
   const [addUsername, setAddUsername] = useState("");
   const [adding, setAdding] = useState(false);
   const [addModalVisible, setAddModalVisible] = useState(false);
+  type SearchUser = { id: string; username: string; display_name: string | null; avatar_url: string | null };
+  const [searchResults, setSearchResults] = useState<SearchUser[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<"all" | "requests" | "sent">("all");
   const [refreshing, setRefreshing] = useState(false);
@@ -96,6 +100,14 @@ export default function FriendsScreen() {
     void loadFriends();
   }, [loadFriends]);
 
+  useEffect(() => {
+    if (addModalVisible) {
+      setError(null);
+      setAddUsername("");
+      setSearchResults([]);
+    }
+  }, [addModalVisible]);
+
   const onRefreshFriends = useCallback(async () => {
     setRefreshing(true);
     try {
@@ -115,44 +127,97 @@ export default function FriendsScreen() {
   const incomingRequests = useMemo(() => pending.filter((p) => p.status === "pending_received"), [pending]);
   const sentRequests = useMemo(() => pending.filter((p) => p.status === "pending_sent"), [pending]);
 
-  const addFriend = async () => {
-    const username = addUsername.trim().toLowerCase();
-    if (!username || !user?.id) return;
+  const runSearch = useCallback(async (query: string) => {
+    const q = query.trim().toLowerCase();
+    if (!q || !user?.id) {
+      setSearchResults([]);
+      return;
+    }
+    setSearchLoading(true);
+    setError(null);
+    try {
+      const { data: rows } = await supabase
+        .from("profiles")
+        .select("id, username, display_name, avatar_url")
+        .ilike("username", `%${q}%`)
+        .neq("id", user.id)
+        .limit(10);
+      const list = (rows || []).map((r) => ({
+        id: (r as { id: string }).id,
+        username: (r as { username?: string }).username ?? "?",
+        display_name: (r as { display_name?: string | null }).display_name ?? null,
+        avatar_url: (r as { avatar_url?: string | null }).avatar_url ?? null,
+      }));
+      setSearchResults(list);
+    } catch {
+      setError("Search failed. Please try again.");
+      setSearchResults([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    const q = addUsername.trim();
+    if (!q) {
+      setSearchResults([]);
+      setSearchLoading(false);
+      return;
+    }
+    setSearchLoading(true);
+    searchDebounceRef.current = setTimeout(() => {
+      searchDebounceRef.current = null;
+      void runSearch(addUsername);
+    }, 300);
+    return () => {
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
+  }, [addUsername, runSearch]);
+
+  const sendFriendRequest = useCallback(async (target: SearchUser) => {
+    if (!user?.id) return;
     const myUsername = profile?.username?.toLowerCase();
-    if (myUsername && username === myUsername) {
+    if (myUsername && target.username.toLowerCase() === myUsername) {
       setError("You can't send a friend request to yourself.");
       return;
     }
     setAdding(true);
     setError(null);
     try {
-      const { data: profileRow } = await supabase.from("profiles").select("id").ilike("username", username).maybeSingle();
-      if (!profileRow?.id) {
-        setError("No user found with that username. They may need to sign up for EZSplit first.");
-        setAdding(false);
-        return;
-      }
-      const friendId = profileRow.id;
-      const { data: existing1 } = await supabase.from("friendships").select("id, status").eq("user_id", user.id).eq("friend_id", friendId).maybeSingle();
-      const { data: existing2 } = await supabase.from("friendships").select("id, status").eq("user_id", friendId).eq("friend_id", user.id).maybeSingle();
+      const { data: existing1 } = await supabase.from("friendships").select("id, status").eq("user_id", user.id).eq("friend_id", target.id).maybeSingle();
+      const { data: existing2 } = await supabase.from("friendships").select("id, status").eq("user_id", target.id).eq("friend_id", user.id).maybeSingle();
       const existing = existing1 || existing2;
       if (existing) {
         if (existing.status === "accepted") setError("You're already friends with this user.");
-        else setError("A request is already pending—either you've sent one or they need to accept yours.");
+        else setError("A request is already pending.");
         setAdding(false);
         return;
       }
-      const { error: insertErr } = await supabase.from("friendships").insert({ user_id: user.id, friend_id: friendId, status: "pending" });
+      const { error: insertErr } = await supabase.from("friendships").insert({ user_id: user.id, friend_id: target.id, status: "pending" });
       if (insertErr) throw new Error(insertErr.message);
       setAddUsername("");
+      setSearchResults([]);
       setAddModalVisible(false);
       await loadFriends();
-    } catch (e) {
+    } catch {
       setError("Something went wrong. Please try again.");
     } finally {
       setAdding(false);
     }
-  };
+  }, [user?.id, profile?.username, loadFriends]);
+
+  const onSelectSearchUser = useCallback((target: SearchUser) => {
+    const name = (target.display_name && target.display_name.trim()) || displayName(target.username);
+    Alert.alert(
+      "Add friend",
+      `Do you want to add ${name} as a friend?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Add", onPress: () => void sendFriendRequest(target) },
+      ]
+    );
+  }, [sendFriendRequest]);
 
   const acceptRequest = async (friendshipId: string) => {
     try {
@@ -405,12 +470,12 @@ export default function FriendsScreen() {
               <Ionicons name="person-add" size={32} color="#8DEB63" />
             </View>
             <Text style={styles.modalTitle}>Add friend</Text>
-            <Text style={styles.modalSub}>Send a request using their EZSplit username</Text>
+            <Text style={styles.modalSub}>Search by username — tap a user to send a request</Text>
 
             <View style={styles.modalField}>
               <View style={styles.modalFieldLabelRow}>
-                <Ionicons name="at-outline" size={14} color="#8DEB63" />
-                <Text style={styles.modalFieldLabel}>Username</Text>
+                <Ionicons name="search-outline" size={14} color="#8DEB63" />
+                <Text style={styles.modalFieldLabel}>Search</Text>
               </View>
               <TextInput
                 value={addUsername}
@@ -423,6 +488,44 @@ export default function FriendsScreen() {
                 editable={!adding}
               />
             </View>
+
+            {searchLoading && addUsername.trim() ? (
+              <View style={styles.dropdownWrap}>
+                <Text style={styles.dropdownLoading}>Searching...</Text>
+              </View>
+            ) : searchResults.length > 0 ? (
+              <View style={styles.dropdownWrap}>
+                <ScrollView style={styles.dropdownScroll} nestedScrollEnabled keyboardShouldPersistTaps="handled">
+                  {searchResults.map((u, idx) => (
+                    <Pressable
+                      key={u.id}
+                      style={({ pressed }) => [styles.dropdownRow, idx === searchResults.length - 1 && styles.dropdownRowLast, pressed && styles.pressed]}
+                      onPress={() => onSelectSearchUser(u)}
+                      disabled={adding}
+                    >
+                      {u.avatar_url ? (
+                        <Image source={{ uri: u.avatar_url }} style={styles.dropdownAvatarImg} />
+                      ) : (
+                        <View style={styles.dropdownAvatar}>
+                          <Text style={styles.dropdownAvatarText}>{initials(u.username)}</Text>
+                        </View>
+                      )}
+                      <View style={styles.dropdownRowCenter}>
+                        <Text style={styles.dropdownName} numberOfLines={1}>
+                          {(u.display_name && u.display_name.trim()) || displayName(u.username)}
+                        </Text>
+                        <Text style={styles.dropdownHandle} numberOfLines={1}>@{u.username}</Text>
+                      </View>
+                      <Ionicons name="person-add-outline" size={20} color="#8DEB63" />
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </View>
+            ) : addUsername.trim() && !searchLoading ? (
+              <View style={styles.dropdownWrap}>
+                <Text style={styles.dropdownEmpty}>No users found. Try a different username.</Text>
+              </View>
+            ) : null}
 
             {error ? (
               <View style={styles.modalErrorWrap}>
@@ -437,20 +540,6 @@ export default function FriendsScreen() {
             <View style={styles.modalActions}>
               <Pressable style={({ pressed }) => [styles.modalCancel, pressed && styles.pressed]} onPress={() => setAddModalVisible(false)}>
                 <Text style={styles.modalCancelText}>Cancel</Text>
-              </Pressable>
-              <Pressable
-                style={({ pressed }) => [
-                  styles.modalAdd,
-                  (adding || !addUsername.trim()) && styles.modalAddDisabled,
-                  pressed && styles.pressed,
-                ]}
-                onPress={() => void addFriend()}
-                disabled={adding || !addUsername.trim()}
-              >
-                <Ionicons name="person-add" size={18} color={adding || !addUsername.trim() ? "#737373" : "#0a0a0a"} />
-                <Text style={[styles.modalAddText, (adding || !addUsername.trim()) && styles.modalAddTextDisabled]}>
-                  {adding ? "Sending..." : "Send request"}
-                </Text>
               </Pressable>
             </View>
           </Pressable>
@@ -708,8 +797,39 @@ const styles = StyleSheet.create({
   modalActions: { flexDirection: "row", gap: 12, marginTop: 8 },
   modalCancel: { flex: 1, paddingVertical: 14, borderRadius: 14, borderWidth: 1, borderColor: "rgba(255,255,255,0.2)", alignItems: "center" },
   modalCancelText: { color: "#e5e5e5", fontSize: 15, fontWeight: "600" },
-  modalAdd: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 14, borderRadius: 14, backgroundColor: "#8DEB63" },
-  modalAddDisabled: { backgroundColor: "#2a2a2a", opacity: 0.9 },
-  modalAddText: { color: "#0a0a0a", fontSize: 15, fontWeight: "700" },
-  modalAddTextDisabled: { color: "#737373" },
+  dropdownWrap: {
+    maxHeight: 220,
+    marginBottom: 16,
+    borderRadius: 14,
+    backgroundColor: "#141414",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    overflow: "hidden",
+  },
+  dropdownScroll: { maxHeight: 220 },
+  dropdownRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    gap: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.06)",
+  },
+  dropdownRowLast: { borderBottomWidth: 0 },
+  dropdownAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: "rgba(141,235,99,0.2)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dropdownAvatarImg: { width: 40, height: 40, borderRadius: 20 },
+  dropdownAvatarText: { color: "#8DEB63", fontSize: 14, fontWeight: "700" },
+  dropdownRowCenter: { flex: 1, minWidth: 0 },
+  dropdownName: { color: "#e5e5e5", fontSize: 15, fontWeight: "600", marginBottom: 2 },
+  dropdownHandle: { color: "#8DEB63", fontSize: 13 },
+  dropdownLoading: { color: "#a3a3a3", fontSize: 14, paddingVertical: 16, paddingHorizontal: 14, textAlign: "center" },
+  dropdownEmpty: { color: "#737373", fontSize: 14, paddingVertical: 16, paddingHorizontal: 14, textAlign: "center" },
 });

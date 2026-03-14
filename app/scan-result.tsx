@@ -260,7 +260,12 @@ type Assignments = Record<number, number[]>;
 type DynamicPercentages = Record<number, Record<number, number>>;
 type GroupMemberInfo = { username: string; display_name?: string | null; avatar_url?: string | null };
 type MemberGroup = { id: string; name: string; avatar_url?: string | null; members: GroupMemberInfo[] };
-type ScanMember = { username: string; avatar_url?: string | null };
+type ScanMember = { username: string; display_name?: string | null; avatar_url?: string | null };
+
+function memberDisplayName(m: ScanMember): string {
+  const d = (m.display_name || "").trim();
+  return d || m.username || "?";
+}
 
 function receiptInitial(merchant: string): string {
   const s = (merchant || "?").trim();
@@ -338,8 +343,10 @@ export default function ScanResultScreen() {
   const [friendsLoading, setFriendsLoading] = useState(false);
   const [friendSearchQuery, setFriendSearchQuery] = useState("");
   const [editLoading, setEditLoading] = useState(false);
+  const [editImageUrl, setEditImageUrl] = useState<string | null>(null);
   const [imageEnlargeVisible, setImageEnlargeVisible] = useState(false);
   const insets = useSafeAreaInsets();
+  const receiptImageUri = imageUri ?? editImageUrl ?? null;
   const hasAssignedMembers = Object.values(assignments).some((memberIndexes) => memberIndexes.length > 0);
   const crossCheckDoneRef = useRef(false);
 
@@ -379,7 +386,7 @@ export default function ScanResultScreen() {
     try {
       const { data: rec, error: recErr } = await supabase
         .from("receipts")
-        .select("id, host_id, merchant, receipt_date, total_amount, currency, split_totals, tax_amount, service_charge, other_charges")
+        .select("id, host_id, merchant, receipt_date, total_amount, currency, split_totals, tax_amount, service_charge, other_charges, image_url")
         .eq("id", receiptId)
         .single();
       if (recErr) throw new Error(recErr.message);
@@ -388,6 +395,7 @@ export default function ScanResultScreen() {
         setEditLoading(false);
         return;
       }
+      setEditImageUrl((rec as { image_url?: string | null }).image_url ?? null);
       setMerchant(String(rec.merchant ?? "").trim());
       setDate(String(rec.receipt_date ?? "").trim());
       setTotal(String(rec.total_amount ?? "").trim());
@@ -415,9 +423,9 @@ export default function ScanResultScreen() {
       const usernames = splitTotalsRaw.map((s: { name?: string }) => String(s?.name ?? "").trim()).filter(Boolean);
       const membersList: ScanMember[] = [];
       for (const uname of usernames) {
-        const { data: prof } = await supabase.from("profiles").select("username, avatar_url").ilike("username", uname).maybeSingle();
-        const p = prof as { username?: string; avatar_url?: string | null } | null;
-        membersList.push({ username: p?.username ?? uname, avatar_url: p?.avatar_url ?? null });
+        const { data: prof } = await supabase.from("profiles").select("username, display_name, avatar_url").ilike("username", uname).maybeSingle();
+        const p = prof as { username?: string; display_name?: string | null; avatar_url?: string | null } | null;
+        membersList.push({ username: p?.username ?? uname, display_name: p?.display_name ?? null, avatar_url: p?.avatar_url ?? null });
       }
       setMembers(membersList);
 
@@ -487,6 +495,10 @@ export default function ScanResultScreen() {
   }, [isEditMode, user?.id, loadReceiptForEdit]);
 
   useEffect(() => {
+    if (!receiptId) setEditImageUrl(null);
+  }, [receiptId]);
+
+  useEffect(() => {
     if (isManualMode && items.length === 0) {
       setItems([{ name: "", qty: 1, price: "0" }]);
       setEditItemsMode(true);
@@ -496,9 +508,9 @@ export default function ScanResultScreen() {
   // Default to host (initiator) on any new scan when no members yet; edit mode loads members from receipt.
   useEffect(() => {
     if (!receiptId && members.length === 0 && profile?.username) {
-      setMembers([{ username: profile.username, avatar_url: profile.avatar_url ?? null }]);
+      setMembers([{ username: profile.username, display_name: profile.display_name ?? null, avatar_url: profile.avatar_url ?? null }]);
     }
-  }, [receiptId, members.length, profile?.username, profile?.avatar_url]);
+  }, [receiptId, members.length, profile?.username, profile?.display_name, profile?.avatar_url]);
 
   const addMemberOptions = useMemo(() => {
     const host =
@@ -590,10 +602,10 @@ export default function ScanResultScreen() {
     }
   };
 
-  const addMemberFromFriend = (friend: { username: string; avatar_url?: string | null }) => {
+  const addMemberFromFriend = (friend: { username: string; display_name?: string | null; avatar_url?: string | null }) => {
     const u = friend.username.trim().toLowerCase();
     if (!u || members.some((m) => m.username.toLowerCase() === u)) return;
-    setMembers((prev) => [...prev, { username: friend.username.trim(), avatar_url: friend.avatar_url ?? null }]);
+    setMembers((prev) => [...prev, { username: friend.username.trim(), display_name: friend.display_name ?? null, avatar_url: friend.avatar_url ?? null }]);
     setAddMemberModalVisible(false);
     setSaveError(null);
   };
@@ -717,7 +729,7 @@ export default function ScanResultScreen() {
         const u = m.username.trim().toLowerCase();
         if (u && !existing.has(u)) {
           existing.add(u);
-          next.push({ username: m.username.trim(), avatar_url: m.avatar_url ?? null });
+          next.push({ username: m.username.trim(), display_name: m.display_name ?? null, avatar_url: m.avatar_url ?? null });
         }
       });
       return next;
@@ -1123,11 +1135,11 @@ export default function ScanResultScreen() {
           </View>
         </View>
 
-        {/* Receipt hero - no image in manual mode */}
+        {/* Receipt hero - no image in manual mode; in edit mode use loaded image_url */}
         <View style={styles.heroCard}>
-          {!isManualMode && (imageUri ? (
+          {!isManualMode && (receiptImageUri ? (
             <Pressable style={styles.heroImageWrap} onPress={() => setImageEnlargeVisible(true)}>
-              <Image source={{ uri: imageUri }} style={styles.heroImage} resizeMode="cover" />
+              <Image source={{ uri: receiptImageUri }} style={styles.heroImage} resizeMode="cover" />
               <View style={styles.heroImageTapHint}>
                 <Ionicons name="expand-outline" size={20} color="rgba(255,255,255,0.8)" />
                 <Text style={styles.heroImageTapHintText}>Tap to enlarge</Text>
@@ -1166,7 +1178,20 @@ export default function ScanResultScreen() {
                 </>
               ) : (
                 <>
-                  <Text style={styles.heroMerchant} numberOfLines={1}>{merchant || "—"}</Text>
+                  {isEditMode ? (
+                    <View style={styles.heroMerchantEditRow}>
+                      <TextInput
+                        style={styles.heroMerchantInput}
+                        value={merchant}
+                        onChangeText={setMerchant}
+                        placeholder="Merchant name"
+                        placeholderTextColor="#525252"
+                      />
+                      <Ionicons name="pencil" size={16} color="#a3a3a3" style={styles.heroMerchantEditIcon} />
+                    </View>
+                  ) : (
+                    <Text style={styles.heroMerchant} numberOfLines={1}>{merchant || "—"}</Text>
+                  )}
                   <Text style={styles.heroDate}>{date || "—"}</Text>
                 </>
               )}
@@ -1194,9 +1219,9 @@ export default function ScanResultScreen() {
         <Modal visible={imageEnlargeVisible} transparent animationType="fade">
           <Pressable style={styles.enlargeOverlay} onPress={() => setImageEnlargeVisible(false)}>
             <View style={styles.enlargeContent} pointerEvents="box-none">
-              {imageUri ? (
+              {receiptImageUri ? (
                 <View style={styles.enlargeImageWrap} pointerEvents="none">
-                  <Image source={{ uri: imageUri }} style={styles.enlargeImage} resizeMode="contain" />
+                  <Image source={{ uri: receiptImageUri }} style={styles.enlargeImage} resizeMode="contain" />
                 </View>
               ) : null}
             </View>
@@ -1227,10 +1252,10 @@ export default function ScanResultScreen() {
                     <ExpoImage source={{ uri: member.avatar_url }} style={styles.memberChipAvatar} />
                   ) : (
                     <View style={styles.memberChipAvatarPlaceholder}>
-                      <Text style={styles.memberChipAvatarText}>{groupInitial(member.username)}</Text>
+                      <Text style={styles.memberChipAvatarText}>{groupInitial(memberDisplayName(member))}</Text>
                     </View>
                   )}
-                  <Text style={styles.memberChipText}>{member.username}</Text>
+                  <Text style={styles.memberChipText}>{memberDisplayName(member)}</Text>
                   {isRestaurantOrGroceriesManual && member.username?.toLowerCase() === profile?.username?.toLowerCase() ? null : (
                     <Pressable onPress={() => removeMember(idx)} hitSlop={8}>
                       <Ionicons name="close-circle" size={18} color="#737373" />
@@ -1336,7 +1361,7 @@ export default function ScanResultScreen() {
                               onPress={() => toggleAssignment(index, memberIndex)}
                               style={({ pressed }) => [styles.assignChip, selected && styles.assignChipSelected, pressed && styles.pressed]}
                             >
-                              <Text style={[styles.assignChipText, selected && styles.assignChipTextSelected]}>{member.username}</Text>
+                              <Text style={[styles.assignChipText, selected && styles.assignChipTextSelected]}>{memberDisplayName(member)}</Text>
                             </Pressable>
                           );
                         })}
@@ -1508,7 +1533,7 @@ export default function ScanResultScreen() {
                 </View>
                 {dynamicAssignees.map((memberIndex) => (
                   <View key={`dynamic-${memberIndex}`} style={styles.modalRow}>
-                    <Text style={styles.modalMember} numberOfLines={1}>{members[memberIndex]?.username ?? `Member ${memberIndex + 1}`}</Text>
+                    <Text style={styles.modalMember} numberOfLines={1}>{members[memberIndex] ? memberDisplayName(members[memberIndex]) : `Member ${memberIndex + 1}`}</Text>
                     <View style={styles.modalInputWrap}>
                       <TextInput
                         keyboardType={dynamicSplitMode === "shares" ? "number-pad" : "decimal-pad"}

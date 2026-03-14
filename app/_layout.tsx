@@ -48,17 +48,34 @@ function AppNavigator() {
   const inAuthScreen = segments[0] === "auth";
   const [profileRefreshDone, setProfileRefreshDone] = useState(false);
 
-  // When we have a session but profile is still null (e.g. slow or failed fetch), retry once so we don't show tabs with "email" as display name
+  // When we have a session but profile is still null, fetch and retry so we show display name instead of "User" / email
   useEffect(() => {
     if (!user || profile !== null || profileRefreshDone) return;
     let mounted = true;
-    refreshProfile().then(() => {
-      if (mounted) setProfileRefreshDone(true);
-    });
+    const run = () => {
+      refreshProfile().then(() => {
+        if (mounted) setProfileRefreshDone(true);
+      });
+    };
+    run();
+    const retryT = setTimeout(() => {
+      if (!mounted) return;
+      refreshProfile().then(() => {
+        if (mounted) setProfileRefreshDone(true);
+      });
+    }, 2000);
     return () => {
       mounted = false;
+      clearTimeout(retryT);
     };
   }, [user, profile, profileRefreshDone, refreshProfile]);
+
+  // Don't block forever on profile: if still waiting after 6s, show app anyway (avoids stuck loading if network hangs)
+  useEffect(() => {
+    if (!user || profile !== null || profileRefreshDone) return;
+    const t = setTimeout(() => setProfileRefreshDone(true), 6000);
+    return () => clearTimeout(t);
+  }, [user, profile, profileRefreshDone]);
 
   const effectiveLoading = loading || (user != null && profile === null && !profileRefreshDone);
 
